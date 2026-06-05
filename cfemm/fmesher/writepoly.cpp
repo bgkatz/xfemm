@@ -46,7 +46,9 @@
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -478,8 +480,7 @@ bool FMesher::HasPeriodicBC()
 {
     bool hasPeriodicBC = false;
     for (const auto &bdryProp: problem->lineproplist)
-    {
-        if (bdryProp->isPeriodic())
+    {        if (bdryProp->isPeriodic())
             hasPeriodicBC = true;
     }
     // if flag is false, there can't be any lines
@@ -1137,9 +1138,13 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
 		}
 
 		// age
-		if ( (problem->lineproplist[i]->BdryFormat==6)
-             || (problem->lineproplist[i]->BdryFormat==7) )
+		//   BdryFormat 6/7 = annular periodic/antiperiodic (attached to arcs)
+		//   BdryFormat 8/9 = planar  periodic/antiperiodic (attached to segments)
+		// The AGE's own BdryFormat = lineprop-6, i.e. 0/1 annular, 2/3 planar.
+		if ( (problem->lineproplist[i]->BdryFormat>=6)
+             && (problem->lineproplist[i]->BdryFormat<=9) )
 		{
+			bool isPlanarAge = (problem->lineproplist[i]->BdryFormat>=8);
 #ifdef DEBUG
             {
                 char buf[1048];
@@ -1147,15 +1152,25 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
                 WarnMessage(buf);
             }
 #endif // DEBUG
-			// only add an AGE to the list if it's actually being used
-			for(j=0,k=0;j<(int)problem->arclist.size();j++)
-				if (problem->arclist[j]->BoundaryMarkerName==problem->lineproplist[i]->BdryName) k++;
+			// only add an AGE to the list if it's actually being used. The
+			// planar AGE lives on straight segments; the annular one on arcs.
+			k=0;
+			if (isPlanarAge)
+			{
+				for(j=0;j<(int)problem->linelist.size();j++)
+					if (problem->linelist[j]->BoundaryMarkerName==problem->lineproplist[i]->BdryName) k++;
+			}
+			else
+			{
+				for(j=0;j<(int)problem->arclist.size();j++)
+					if (problem->arclist[j]->BoundaryMarkerName==problem->lineproplist[i]->BdryName) k++;
+			}
 			if (k>1)
 			{
 				age.BdryName=problem->lineproplist[i]->BdryName;
-				age.BdryFormat=problem->lineproplist[i]->BdryFormat-6; // 0 for pbc, 1 for apbc
-				age.InnerAngle=problem->lineproplist[i]->InnerAngle;
-				age.OuterAngle=problem->lineproplist[i]->OuterAngle;
+				age.BdryFormat=problem->lineproplist[i]->BdryFormat-6; // 0/1 annular, 2/3 planar
+				age.InnerAngle=problem->lineproplist[i]->InnerAngle;   // planar: rotor displacement (mm)
+				age.OuterAngle=problem->lineproplist[i]->OuterAngle;   // planar: stator displacement (mm, usually 0)
 				agelst.push_back(age.clone());
 #ifdef DEBUG
                 {
@@ -1207,32 +1222,86 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
 		}
 	}
 
-	// cycle through AGEs and fix constituent arcs so that all arcs have the same discretization
+	// Planar AGE geometry: derive the gap y-levels (ri=lower face, ro=upper
+	// face), the cell length, and the cell origin from the two bounding
+	// horizontal segments. Mirrors the arc loop above, but for straight edges
+	// and with explicit init (y-levels may be 0 or negative, so the annular
+	// "ro==0 means uninitialised" trick doesn't apply).
+	for(j=0;j<(int)agelst.size();j++)
+	{
+		if (agelst[j]->BdryFormat < 2) continue; // planar AGEs only
+		bool firstSeg=true;
+		double xmin=0.,xmax=0.;
+		for(i=0;i<(int)problem->linelist.size();i++)
+		{
+			if (problem->linelist[i]->BoundaryMarkerName!=agelst[j]->BdryName) continue;
+			double xa=problem->nodelist[problem->linelist[i]->n0]->x;
+			double ya=problem->nodelist[problem->linelist[i]->n0]->y;
+			double xb=problem->nodelist[problem->linelist[i]->n1]->x;
+			double yb=problem->nodelist[problem->linelist[i]->n1]->y;
+			double yy=(ya+yb)/2.;               // segment y-level (horizontal)
+			agelst[j]->totalArcLength += fabs(xb-xa);     // summed over both rows
+			agelst[j]->totalArcElements += problem->linelist[i]->IsSelected;
+			if (firstSeg){ agelst[j]->ri=yy; agelst[j]->ro=yy;
+				xmin=std::min(xa,xb); xmax=std::max(xa,xb); firstSeg=false; }
+			if (yy>agelst[j]->ro) agelst[j]->ro=yy;
+			if (yy<agelst[j]->ri) agelst[j]->ri=yy;
+			xmin=std::min(xmin,std::min(xa,xb));
+			xmax=std::max(xmax,std::max(xa,xb));
+		}
+		agelst[j]->agc.re=xmin;     // cell origin x0 (im unused for planar)
+		agelst[j]->agc.im=0.;
+	}
+
+	// cycle through AGEs and fix constituent arcs/segments so that all have the
+	// same discretization
 	for (i=0;i<(int)agelst.size();i++)
 	{
 		if (agelst[i]->totalArcLength>0) // if the AGE is actually in play
 		{
-			char kludge[32];
-			double myMaxSideLength,altMaxSideLength;
+			bool isPlanarAge = (agelst[i]->BdryFormat >= 2);
 
-			myMaxSideLength=agelst[i]->totalArcLength/agelst[i]->totalArcElements;
-			agelst[i]->totalArcLength/=2;	// this is now the angle spanned by the AGE
+			if (isPlanarAge)
+			{
+				agelst[i]->totalArcLength/=2;	// per-row span = cell length L
+				// Uniformize both airgap segments to the finest mesh size the
+				// user set on them (elementsize via mi_setsegmentprop); default
+				// to L/40 if none was set, so the band isn't a single element.
+				double mset=-1.;
+				for(j=0;j<(int)problem->linelist.size();j++)
+					if (problem->linelist[j]->BoundaryMarkerName==agelst[i]->BdryName)
+					{
+						double ms=problem->linelist[j]->MaxSideLength;
+						if (ms>0. && (mset<0. || ms<mset)) mset=ms;
+					}
+				if (mset<=0.) mset=agelst[i]->totalArcLength/40.;
+				for(j=0;j<(int)problem->linelist.size();j++)
+					if (problem->linelist[j]->BoundaryMarkerName==agelst[i]->BdryName)
+						problem->linelist[j]->MaxSideLength=mset;
+			}
+			else
+			{
+				char kludge[32];
+				double myMaxSideLength,altMaxSideLength;
 
-			// however, don't want long, skinny air gap elements.  Impose some limits
-			// based on the inner and outer radii;
-			altMaxSideLength=(360./PI)*(agelst[i]->ro-agelst[i]->ri)/(agelst[i]->ro+agelst[i]->ri);
-			if (altMaxSideLength<myMaxSideLength) myMaxSideLength=altMaxSideLength;
-			sprintf(kludge,"%.1e",myMaxSideLength);
-			sscanf(kludge,"%lf",&myMaxSideLength);
+				myMaxSideLength=agelst[i]->totalArcLength/agelst[i]->totalArcElements;
+				agelst[i]->totalArcLength/=2;	// this is now the angle spanned by the AGE
 
-			// apply new side length to all arcs in this AGE
-			for(j=0;j<(int)problem->arclist.size();j++)
-				if (problem->arclist[j]->BoundaryMarkerName==agelst[i]->BdryName)
-					problem->arclist[j]->MaxSideLength=myMaxSideLength;
+				// however, don't want long, skinny air gap elements; clamp by radii
+				altMaxSideLength=(360./PI)*(agelst[i]->ro-agelst[i]->ri)/(agelst[i]->ro+agelst[i]->ri);
+				if (altMaxSideLength<myMaxSideLength) myMaxSideLength=altMaxSideLength;
+				sprintf(kludge,"%.1e",myMaxSideLength);
+				sscanf(kludge,"%lf",&myMaxSideLength);
+
+				for(j=0;j<(int)problem->arclist.size();j++)
+					if (problem->arclist[j]->BoundaryMarkerName==agelst[i]->BdryName)
+						problem->arclist[j]->MaxSideLength=myMaxSideLength;
+			}
 		}
 	}
 
-	// and perform a quick error check; AGE BCs can't be applied to segments (at least yet)
+	// error check: an annular (arc) AGE BC must not be applied to line segments.
+	// Planar AGEs (BdryFormat>=2) are *meant* to live on segments, so allow those.
 	for (i=0;i<(int)problem->linelist.size();i++)
 	{
 		if (problem->linelist[i]->BoundaryMarkerName!="<None>")
@@ -1240,9 +1309,10 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
 			for(j=0;j<(int)agelst.size();j++)
 			{
 
-				if (problem->linelist[i]->BoundaryMarkerName==agelst[j]->BdryName)
+				if ((problem->linelist[i]->BoundaryMarkerName==agelst[j]->BdryName)
+				    && (agelst[j]->BdryFormat < 2))
 				{
-					WarnMessage("Can't apply Air Gap Element BCs to line segments");
+					WarnMessage("Can't apply annular Air Gap Element BCs to line segments");
 					problem->undo();
 					//UnselectAll();
 					return -2;
@@ -1653,6 +1723,67 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
 	{
 		std::vector <int> myVector;
 
+		if (agelst[n]->BdryFormat >= 2)
+		{
+		// Planar AGE: discretize the two straight bounding segments by linear
+		// interpolation (mirrors the arc loop, sans GetCircle/rotation). Upper
+		// face (y>ymid, = ro) goes to the "outer" ring, lower face to "inner".
+		double ymid=(agelst[n]->ro + agelst[n]->ri)/2.;
+		for(i=0;i<(int)problem->linelist.size();i++)
+		if((problem->linelist[i]->IsSelected==false) && (problem->linelist[i]->BoundaryMarkerName==agelst[n]->BdryName)){
+			problem->linelist[i]->IsSelected=true;
+			double xa=problem->nodelist[problem->linelist[i]->n0]->x;
+			double ya=problem->nodelist[problem->linelist[i]->n0]->y;
+			double xb=problem->nodelist[problem->linelist[i]->n1]->x;
+			double yb=problem->nodelist[problem->linelist[i]->n1]->y;
+			double seglen=sqrt((xb-xa)*(xb-xa)+(yb-ya)*(yb-ya));
+			k=(int) ceil(seglen/problem->linelist[i]->MaxSideLength);
+			segm.BoundaryMarker=problem->linelist[i]->BoundaryMarker;
+			bool isTop=(ya>ymid);   // upper (outer) face vs lower (inner) face
+
+			// insert the starting node
+			if (isTop) myVector.push_back(problem->linelist[i]->n0);
+			else       myVector.insert(myVector.begin(),problem->linelist[i]->n0);
+
+			if(k==1){
+				segm.n0=problem->linelist[i]->n0;
+				segm.n1=problem->linelist[i]->n1;
+				linelst.push_back(segm.clone());
+			}
+			else for(j=0;j<k;j++)
+			{
+				double t=((double)(j+1))/((double)k);
+				node.x=xa+(xb-xa)*t; node.y=ya+(yb-ya)*t;
+				if(j==0){
+					l=(int) nodelst.size();
+					nodelst.push_back(node.clone());
+					segm.n0=problem->linelist[i]->n0;
+					segm.n1=l;
+					linelst.push_back(segm.clone());
+					if (isTop) myVector.push_back(l);
+					else       myVector.insert(myVector.begin(),l);
+				}
+				else if(j==(k-1)){
+					l=(int) nodelst.size()-1;
+					segm.n0=l;
+					segm.n1=problem->linelist[i]->n1;
+					linelst.push_back(segm.clone());
+				}
+				else{
+					l=(int) nodelst.size();
+					nodelst.push_back(node.clone());
+					segm.n0=l-1;
+					segm.n1=l;
+					linelst.push_back(segm.clone());
+					if (isTop) myVector.push_back(l);
+					else       myVector.insert(myVector.begin(),l);
+				}
+			}
+		}
+		}
+		else
+		{
+
 		z = (agelst[n]->ro + agelst[n]->ri)/2.;
 
 		for(i=0;i<(int)problem->arclist.size();i++)
@@ -1715,9 +1846,15 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
 				}
 			}
 		}
+		} // end annular/planar branch
         agelst[n]->nodeNums.clear ();
 		agelst[n]->nodeNums.shrink_to_fit ();
-		agelst[n]->nodeNums.reserve (myVector.size()+1);
+		// NB: resize(), not reserve(): the entries below are written via
+		// operator[], so the vector must actually contain them. Using reserve()
+		// (capacity only, size stays 0) made every write below out-of-bounds,
+		// corrupting the heap-adjacent node coordinate list into NaNs and
+		// hanging Triangle. Index 0 holds the count; 1..count the node numbers.
+		agelst[n]->nodeNums.resize (myVector.size()+1);
 		agelst[n]->nodeNums[0]=(int) myVector.size();
 		for(k=0;k<(int)myVector.size();k++) agelst[n]->nodeNums[k+1]=myVector[k];
 	}
@@ -1861,9 +1998,23 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
 		OuterRing.shrink_to_fit();
 
 		n=agelst[k]->nodeNums[0]/2;
-		dtta = agelst[k]->totalArcLength/n;
-		n0=(int) round(360./dtta); // total elements in a 360deg annular ring;
-		n1=(int) round(360./agelst[k]->totalArcLength); // number of copied segments
+		bool isPlanarAge = (agelst[k]->BdryFormat >= 2);
+		dtta = agelst[k]->totalArcLength/n;  // annular: deg per element; planar: dx = L/n
+		if (isPlanarAge)
+		{
+			// A linear PERIODIC cell IS the period: one ring of n elements.
+			// A linear ANTI-periodic cell has period = TWO cells (f(x+L)=-f(x)),
+			// so the ring is built over 2 cells with the second sign-flipped —
+			// the planar analogue of the annular full-ring fill (alternating-sign
+			// slices).  Displacement wraps within the (1- or 2-cell) period.
+			bool anti=((agelst[k]->BdryFormat&1)!=0);
+			n0 = anti ? 2*n : n;
+			n1=1;		}
+		else
+		{
+			n0=(int) round(360./dtta); // total elements in a 360deg annular ring;
+			n1=(int) round(360./agelst[k]->totalArcLength); // number of copied segments
+		}
 
 		// Should do some consistency checking here;
 		//   totalArcLength*n1 should equal 360
@@ -1876,6 +2027,50 @@ int FMesher::DoPeriodicBCTriangulation(string PathName)
 
 		// map each bdry point onto points on the ring;
 		int kk;
+		if (isPlanarAge)
+		{
+			// Planar AGE node->ring mapping. A node's ring position is its x
+			// offset from the cell origin (rotor row shifted by the displacement
+			// carried in InnerAngle, stator row by OuterAngle), divided by the
+			// element width dx (=dtta).
+			//
+			// PERIODIC (1 cell, period L): each physical node maps to ONE ring
+			// position (mod L), weight +1.
+			//
+			// ANTI-PERIODIC (2 cells, period 2L): each physical node maps to TWO
+			// ring positions — p (weight +1) and p+L (weight -1), the latter being
+			// its antiperiodic image — both taken mod 2L.  This bakes f(x+L)=-f(x)
+			// into the band exactly as the annular path's alternating-sign slices
+			// do, so a half-period displacement correctly negates the field.
+			bool anti=((agelst[k]->BdryFormat&1)!=0);
+			double Lcell=agelst[k]->totalArcLength;       // cell length L
+			int ncells = anti ? 2 : 1;
+			double Lper = ncells*Lcell;                   // period (L or 2L)
+			kk=0;
+			for(int cell=0;cell<ncells;cell++)
+			{
+				double csign = (cell==1) ? -1. : 1.;      // 2nd cell = image
+				for(i=1;i<=n;i++,kk++)
+				{
+					double xin=nodelst[agelst[k]->nodeNums[i]]->x
+					           - agelst[k]->agc.re + agelst[k]->InnerAngle
+					           + cell*Lcell;
+					xin -= floor(xin/Lper)*Lper;          // wrap into [0,Lper)
+					InnerRing[kk].n0=agelst[k]->nodeNums[i];
+					InnerRing[kk].w0=xin/dtta;
+					InnerRing[kk].w1=csign;
+
+					double xon=nodelst[agelst[k]->nodeNums[i+n]]->x
+					           - agelst[k]->agc.re + agelst[k]->OuterAngle
+					           + cell*Lcell;
+					xon -= floor(xon/Lper)*Lper;
+					OuterRing[kk].n0=agelst[k]->nodeNums[i+n];
+					OuterRing[kk].w0=xon/dtta;
+					OuterRing[kk].w1=csign;
+				}
+			}
+		}
+		else
 		for(j=0,kk=0;j<n1;j++)  // do each slice
 		{
 			if ((agelst[k]->BdryFormat==1) && (j % 2 != 0)) dL=-1; // antiperiodic

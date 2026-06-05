@@ -76,9 +76,11 @@ CMBoundaryProp::CMBoundaryProp()
 
 bool CMBoundaryProp::isPeriodic(PeriodicityType pt) const
 {
+    // BdryFormat: 4=periodic, 5=antiperiodic, 6/7=annular air-gap
+    // periodic/antiperiodic, 8/9=planar air-gap periodic/antiperiodic.
     if (pt==PeriodicityType::Any || pt==PeriodicityType::Periodic)
     {
-        if (BdryFormat==4 || BdryFormat==6)
+        if (BdryFormat==4 || BdryFormat==6 || BdryFormat==8)
         {
             return true;
         }
@@ -86,7 +88,7 @@ bool CMBoundaryProp::isPeriodic(PeriodicityType pt) const
 
     if (pt==PeriodicityType::Any || pt==PeriodicityType::AntiPeriodic)
     {
-        if (BdryFormat==5 || BdryFormat==7)
+        if (BdryFormat==5 || BdryFormat==7 || BdryFormat==9)
         {
             return true;
         }

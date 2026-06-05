@@ -1430,7 +1430,46 @@ bool FPProc::OpenDocument(string pathname)
 		ro=agelist[i].ro/R;
 		dt=(PI/180.)*agelist[i].totalArcLength/((double) agelist[i].totalArcElements);
 
-		if (agelist[i].BdryFormat==0)
+		if (agelist[i].BdryFormat >= 2)
+		{
+			// Planar AGE: ri/ro are the gap y-levels and totalArcLength is the
+			// cell length L. Reparameterise so the annular field/harmonic
+			// formulas below apply to the rectangular gap element: pick R so
+			// that dt*R == dx (the element x-size), dr = gap height, and use a
+			// single fundamental spatial period (m=1).
+			dr=(agelist[i].ro - agelist[i].ri);
+			// ri/ro were already scaled to meters (above); use the cell length
+			// in meters too so dt*R == dx_meters. Then br=dA/dx and bt=dA/dy are
+			// both divided by a length in meters and come out in Tesla.
+			//
+			// Harmonic basis: the convolution below runs tta=(k+0.5)*dt over
+			// k=0..N-1, so the cell [0,L] maps to [0, N*dt]. The fundamental
+			// harmonic must complete ONE cycle over the cell when periodic, but
+			// only HALF a cycle when anti-periodic (the field is antiperiodic
+			// over the cell, f(x+L)=-f(x), built as a 2-cell ring in the mesher).
+			// Hence the cell maps to 2*PI when periodic (dt=2*PI/N) and to PI when
+			// anti-periodic (dt=PI/N); R is set so dt*R stays == dx_meters in both
+			// cases (mirrors the annular m=360/arc vs 180/arc convention).
+			{
+				double Lm = agelist[i].totalArcLength*LengthConv[LengthUnits];
+				if ((agelist[i].BdryFormat & 1)==0)
+				{
+					R =Lm/(2.*PI);
+					dt=2.*PI/((double) agelist[i].totalArcElements);
+					agelist[i].nn=(agelist[i].totalArcElements/2)+1;   // periodic
+				}
+				else
+				{
+					R =Lm/PI;
+					dt=PI/((double) agelist[i].totalArcElements);
+					agelist[i].nn=(agelist[i].totalArcElements+1)/2;   // antiperiodic
+				}
+			}
+			ri=agelist[i].ri/R;
+			ro=agelist[i].ro/R;
+			m =1;
+		}
+		else if (agelist[i].BdryFormat==0)
 		{
 			agelist[i].nn=(agelist[i].totalArcElements/2)+1; // periodic AGE
 			m = (int) round(360./agelist[i].totalArcLength);
@@ -1536,12 +1575,12 @@ bool FPProc::OpenDocument(string pathname)
 			}
 
 			// fix antiperiodic weights...
-			if ((k==0) && (agelist[i].BdryFormat==1))
+			if ((k==0) && ((agelist[i].BdryFormat&1)!=0))
 			{
 				ww[0]=-ww[0];
 				ww[5]=-ww[5];
 			}
-			if (((k+1)==agelist[i].totalArcElements) && (agelist[i].BdryFormat==1))
+			if (((k+1)==agelist[i].totalArcElements) && ((agelist[i].BdryFormat&1)!=0))
 			{
 				ww[4]=-ww[4];
 				ww[9]=-ww[9];
@@ -1551,7 +1590,7 @@ bool FPProc::OpenDocument(string pathname)
 				a[kk]=meshnode[nn[kk]].A*ww[kk];
 
 			// A at the center of the element
-			if (agelist[i].BdryFormat==0)
+			if ((agelist[i].BdryFormat&1)==0)
 			{
 				ac = (2*a[2]+2*a[3]+2*a[7]+2*a[8]+a[1]*ci+(a[2]-a[3]-a[4])*ci-(a[0]-3*a[1]+a[2]+3*a[3]-2*a[4])*std::pow(ci,2)+(a[0]-2*a[1]+2*a[3]-a[4])*std::pow(ci,3)+(a[6]+a[7]-a[8]-a[9])*co-
 					 (a[5]-3*a[6]+a[7]+3*a[8]-2*a[9])*std::pow(co,2)+(a[5]-2*a[6]+2*a[8]-a[9])*std::pow(co,3))/8.;
@@ -1579,7 +1618,7 @@ bool FPProc::OpenDocument(string pathname)
 		// Convolve with sines and cosines to get amplitudes of each harmonic
 		for(j=0;j<agelist[i].nn;j++)
 		{
-			if (agelist[i].BdryFormat==0) agelist[i].nh[j]=m*j;
+			if ((agelist[i].BdryFormat&1)==0) agelist[i].nh[j]=m*j;
 			else agelist[i].nh[j]=m*(2*j+1);
 
 			n=agelist[i].nh[j];
@@ -1605,7 +1644,7 @@ bool FPProc::OpenDocument(string pathname)
 			}
 
 			if ((agelist[i].nh[j] == 0) ||
-				(((j==(agelist[i].nn-1)) && (agelist[i].BdryFormat==0)) && ((agelist[i].totalArcElements%2)==0)))
+				(((j==(agelist[i].nn-1)) && ((agelist[i].BdryFormat&1)==0)) && ((agelist[i].totalArcElements%2)==0)))
 			{
 				brc /= agelist[i].totalArcElements;
 				brs /= agelist[i].totalArcElements;
@@ -5595,6 +5634,32 @@ FPProcError FPProc::gapDCForceIntegral(const std::string myBdryName, CComplex &f
     fx=0;
     fy=0;
     CComplex dfx,dfy;
+
+    if (agelist[i].BdryFormat >= 2)
+    {
+        // Planar AGE: integrate the Maxwell stress along the gap centreline
+        // over one cell. With By,Bx expanded in the cell's spatial harmonics
+        // (brc/brs = normal, btc/bts = tangential), orthogonality gives
+        //   Fx = (Depth/mu0)*Integral(Bx*By dx)   = (Depth*L/(2*mu0))*sum(brc*btc+brs*bts)
+        //   Fy = (Depth/mu0)*Integral((By^2-Bx^2)/2 dx) = (Depth*L/(4*mu0))*sum(brc^2+brs^2-btc^2-bts^2)
+        // This is the planar analogue of the rotary harmonic torque and is
+        // ripple-free by construction (no per-step re-meshing).
+        double L = agelist[i].totalArcLength*LengthConv[LengthUnits];   // cell length, meters
+        CComplex sfx=0., sfy=0.;
+        for(k=0;k<agelist[i].nn;k++)
+        {
+            sfx += agelist[i].brc[k]*conj(agelist[i].btc[k])
+                 + agelist[i].brs[k]*conj(agelist[i].bts[k]);
+            sfy += 0.5*(agelist[i].brc[k]*conj(agelist[i].brc[k])
+                      + agelist[i].brs[k]*conj(agelist[i].brs[k])
+                      - agelist[i].btc[k]*conj(agelist[i].btc[k])
+                      - agelist[i].bts[k]*conj(agelist[i].bts[k]));
+        }
+        fx = sfx*(L*Depth)/(2.*muo);
+        fy = sfy*(L*Depth)/(2.*muo);
+        if (Frequency!=0){ fx/=2.; fy/=2.; }
+        return FPProcError::NoError;
+    }
 
     if (round(agelist[i].totalArcLength)==360)
     {

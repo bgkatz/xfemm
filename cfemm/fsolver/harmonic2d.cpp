@@ -26,7 +26,9 @@
 #include "spars.h"
 
 #include <algorithm>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,10 +235,20 @@ int FSolver::Harmonic2D(CBigComplexLinProb &L,bool verbose)
             int nn[10];
             double ww[10];
 
-            // K = dr/(R*dtta)
-            K=2.*(agelist[i].ro-agelist[i].ri)/
-               ((PI/180.)*(agelist[i].totalArcLength/agelist[i].totalArcElements)*
-               (agelist[i].ro+agelist[i].ri));
+            // Aspect ratio K (see static2d.cpp). BdryFormat >= 2 is a planar
+            // air gap: ri/ro are gap y-levels, totalArcLength is the cell
+            // length L (mm), so K = (ro-ri)/dx with dx = L/totalArcElements.
+            if (agelist[i].BdryFormat >= 2)
+            {
+                double dx=agelist[i].totalArcLength/agelist[i].totalArcElements;
+                K=(agelist[i].ro-agelist[i].ri)/dx;
+            }
+            else
+            {
+                K=2.*(agelist[i].ro-agelist[i].ri)/
+                   ((PI/180.)*(agelist[i].totalArcLength/agelist[i].totalArcElements)*
+                   (agelist[i].ro+agelist[i].ri));
+            }
             Ki=1./K;
             ci=agelist[i].InnerShift;
             co=agelist[i].OuterShift;
@@ -365,12 +377,12 @@ int FSolver::Harmonic2D(CBigComplexLinProb &L,bool verbose)
                 }
 
                 // fix antiperiodic weights...
-                if ((k==0) && (agelist[i].BdryFormat==1))
+                if ((k==0) && ((agelist[i].BdryFormat & 1) != 0))
                 {
                     ww[0]=-ww[0];
                     ww[5]=-ww[5];
                 }
-                if ((k==agelist[i].totalArcElements) && (agelist[i].BdryFormat==1))
+                if ((k==agelist[i].totalArcElements) && ((agelist[i].BdryFormat & 1) != 0))
                 {
                     ww[4]=-ww[4];
                     ww[9]=-ww[9];

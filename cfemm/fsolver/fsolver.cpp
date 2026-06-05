@@ -44,7 +44,9 @@
 #include <fstream>
 #include <ios>
 #include <iostream>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <math.h>
 #include <sstream>
 #include <stdio.h>

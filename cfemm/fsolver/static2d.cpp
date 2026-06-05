@@ -29,7 +29,9 @@
 
 #include <stdio.h>
 #include <math.h>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <string>
 #include <cstdio>
 
@@ -197,10 +199,25 @@ int FSolver::Static2D(CBigLinProb &L)
             double ww[10];
             double dt;
 
-            // K = dr/(R*dtta)
-            dt=(PI/180.)*(agelist[i].totalArcLength/agelist[i].totalArcElements);
-            K=2.*(agelist[i].ro-agelist[i].ri)/
-               (dt*(agelist[i].ro+agelist[i].ri));
+            // Aspect ratio K of one air-gap quad element.
+            // BdryFormat 0/1 = annular periodic/antiperiodic, 2/3 = planar
+            // periodic/antiperiodic. For the annular band the element spans a
+            // radial extent (ro-ri) over a mean arc length R*dtta, so
+            // K = (ro-ri)/(R*dtta) with R=(ro+ri)/2 and dtta in radians. For
+            // the planar band ri/ro are the gap y-levels and totalArcLength is
+            // the cell length L (mm), so the element is a rectangle of height
+            // (ro-ri) and width dx = L/totalArcElements: K = (ro-ri)/dx.
+            if (agelist[i].BdryFormat >= 2)
+            {
+                double dx=agelist[i].totalArcLength/agelist[i].totalArcElements;
+                K=(agelist[i].ro-agelist[i].ri)/dx;
+            }
+            else
+            {
+                dt=(PI/180.)*(agelist[i].totalArcLength/agelist[i].totalArcElements);
+                K=2.*(agelist[i].ro-agelist[i].ri)/
+                   (dt*(agelist[i].ro+agelist[i].ri));
+            }
             Ki=1./K;
             ci=agelist[i].InnerShift;
             co=agelist[i].OuterShift;
@@ -330,12 +347,12 @@ int FSolver::Static2D(CBigLinProb &L)
                 }
 
                 // fix antiperiodic weights...
-                if ((k==0) && (agelist[i].BdryFormat==1))
+                if ((k==0) && ((agelist[i].BdryFormat & 1) != 0))
                 {
                     ww[0]=-ww[0];
                     ww[5]=-ww[5];
                 }
-                if (((k+1)==agelist[i].totalArcElements) && (agelist[i].BdryFormat==1))
+                if (((k+1)==agelist[i].totalArcElements) && ((agelist[i].BdryFormat & 1) != 0))
                 {
                     ww[4]=-ww[4];
                     ww[9]=-ww[9];
