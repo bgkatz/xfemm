@@ -1543,7 +1543,13 @@ void femm::FemmProblem::getCircle(const femm::CArcSegment &arc, CComplex &c, dou
     R = d / (2.*sin(tta/2.));
 
     // center of the arc segment's circle
-    c = a0 + (d/2. + I * sqrt(R*R - d*d / 4.)) * t;
+    // NB: for a ~180 deg arc, R*R - d*d/4 is mathematically 0 but can round to a
+    // tiny negative value (sin(pi/2) is not exactly 1 in floating point, and the
+    // rounding differs across platforms/libm), making sqrt() return NaN. Clamp
+    // the radicand at 0 so the center stays finite.
+    double radicand = R*R - d*d / 4.;
+    if (radicand < 0) radicand = 0;
+    c = a0 + (d/2. + I * sqrt(radicand)) * t;
 }
 
 std::string femm::FemmProblem::getTitle() const
@@ -2323,7 +2329,11 @@ void femm::FemmProblem::GetCircle(const CArcSegment &arc, CComplex &c, double &R
     t=(a1-a0)/d;
     tta=arc.ArcLength*PI/180.;
     R=d/(2.*sin(tta/2.));
-    c=a0 + (d/2. + I*sqrt(R*R-d*d/4.))*t; // center of the arc segment's circle...
+    // clamp radicand at 0: for a ~180 deg arc it is mathematically 0 but can
+    // round negative (platform-dependent), making sqrt() return NaN. See getCircle().
+    double radicand = R*R-d*d/4.;
+    if (radicand < 0) radicand = 0;
+    c=a0 + (d/2. + I*sqrt(radicand))*t; // center of the arc segment's circle...
 }
 
 double femm::FemmProblem::ShortestDistanceFromArc(const CComplex p, const CArcSegment &arc) const

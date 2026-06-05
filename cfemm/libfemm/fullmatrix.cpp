@@ -21,7 +21,11 @@
 
 #include <cstdlib>
 #include <math.h>
+#ifdef __APPLE__
+#include <stdlib.h>
+#else
 #include "malloc.h"
+#endif
 #include "femmcomplex.h"
 #include "fullmatrix.h"
 

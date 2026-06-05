@@ -22,7 +22,9 @@
 #include<stdio.h>
 #include<math.h>
 #include<algorithm>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include "femmcomplex.h"
 #include "femmconstants.h"
 #include "CElement.h"

@@ -28,7 +28,9 @@
 #include "spars.h"
 
 #include <cstdio>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <math.h>
 #include <string>
 

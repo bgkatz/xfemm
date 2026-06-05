@@ -42,7 +42,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <cstring>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 
 // template instantiation:
 #include "../libfemm/feasolver.cpp"

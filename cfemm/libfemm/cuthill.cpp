@@ -23,7 +23,11 @@
 
 #include<stdio.h>
 #include<math.h>
+#ifdef __APPLE__
+#include <stdlib.h>
+#else
 #include "malloc.h"
+#endif
 #include "femmcomplex.h"
 #include "femmconstants.h"
 #include "femmenums.h"

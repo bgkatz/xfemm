@@ -626,7 +626,14 @@ CComplex exp( const CComplex& x)
     const double exp_x = exp(x.re);
     double sin_x;
     double cos_x;
+#if defined(__APPLE__)
+    __sincos(x.im, &sin_x, &cos_x);
+#elif defined(_GNU_SOURCE) || defined(__GLIBC__)
     sincos(x.im, &sin_x, &cos_x);
+#else
+    sin_x = sin(x.im);
+    cos_x = cos(x.im);
+#endif
     y.re=cos_x*exp_x;
     y.im=sin_x*exp_x;
 

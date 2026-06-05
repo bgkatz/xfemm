@@ -14,6 +14,16 @@ else()
         add_library(triangle STATIC
             triangle/triangle.c
             )
+        # Triangle uses Shewchuk's adaptive-precision robust geometric
+        # predicates, which require each floating-point multiply and add to be
+        # rounded separately (the "Two-Product"/"Two-Sum" error-free transforms).
+        # Compilers that contract multiply-adds into a single FMA (the default
+        # on arm64/Apple Silicon) silently break these transforms, so the
+        # predicates can return incorrect signs. Disable FP contraction here so
+        # the predicates remain exact.
+        if (NOT MSVC)
+            target_compile_options(triangle PRIVATE -ffp-contract=off)
+        endif()
         # a bit of a dirty hack to make the link line nicer:
         add_library(Triangle::triangle-api ALIAS triangle)
         target_include_directories(triangle PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/triangle> $<INSTALL_INTERFACE:include>)
