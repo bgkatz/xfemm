@@ -22,6 +22,8 @@
 #ifndef SPARS_H
 #define SPARS_H
 
+#include <vector>
+
 class CEntry
 {
 public:
@@ -80,6 +82,20 @@ public:
 
 private:
 
+    // Flat (CSR-style) copy of the matrix used by the iterative solver
+    // kernels.  The linked-list representation in M is convenient for
+    // incremental assembly but is slow to traverse; PCGSolve copies it
+    // into these contiguous arrays before iterating.  The diagonal is
+    // stored separately in csrDiag; csrCol/csrVal hold the strictly
+    // upper-triangular entries of row i in
+    // [csrRowStart[i], csrRowStart[i+1]).
+    std::vector<int> csrRowStart;
+    std::vector<int> csrCol;
+    std::vector<double> csrVal;
+    std::vector<double> csrDiag;
+
+    // copy the linked-list matrix M into the CSR arrays above
+    void FlattenMatrix();
 };
 
 #endif

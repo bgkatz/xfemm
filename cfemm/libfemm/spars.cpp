@@ -164,23 +164,54 @@ void CBigLinProb::AddTo(double v, int p, int q)
 	Put(Get(p,q)+v,p,q);
 }
 
-void CBigLinProb::MultA(double *X, double *Y)
+void CBigLinProb::FlattenMatrix()
 {
-    int i;
+    int i,k;
     CEntry *e;
 
-    for(i=0; i<n; i++) Y[i]=0;
+    csrDiag.resize(n);
+    csrRowStart.resize(n+1);
+
+    csrRowStart[0]=0;
+    for(i=0; i<n; i++)
+    {
+        // the first entry of each row is always the diagonal
+        csrDiag[i]=M[i]->x;
+        k=0;
+        for(e=M[i]->next; e!=NULL; e=e->next) k++;
+        csrRowStart[i+1]=csrRowStart[i]+k;
+    }
+
+    csrCol.resize(csrRowStart[n]);
+    csrVal.resize(csrRowStart[n]);
+    for(i=0,k=0; i<n; i++)
+    {
+        for(e=M[i]->next; e!=NULL; e=e->next,k++)
+        {
+            csrCol[k]=e->c;
+            csrVal[k]=e->x;
+        }
+    }
+}
+
+void CBigLinProb::MultA(double *X, double *Y)
+{
+    int i,k;
+
+    if ((int)csrDiag.size() != n) FlattenMatrix();
+
+    for(i=0; i<n; i++) Y[i]=csrDiag[i]*X[i];
 
     for(i=0; i<n; i++)
     {
-        Y[i]+=M[i]->x*X[i];
-        e=M[i]->next;
-        while(e!=NULL)
+        const double xi=X[i];
+        double yi=0;
+        for(k=csrRowStart[i]; k<csrRowStart[i+1]; k++)
         {
-            Y[i]+=e->x*X[e->c];
-            Y[e->c]+=e->x*X[i];
-            e=e->next;
+            yi+=csrVal[k]*X[csrCol[k]];
+            Y[csrCol[k]]+=csrVal[k]*xi;
         }
+        Y[i]+=yi;
     }
 }
 
@@ -201,9 +232,10 @@ void CBigLinProb::MultPC(const double *X, double *Y)
     // for(i=0;i<n;i++) Y[i]=X[i]/M[i]->x;
 
     // SSOR preconditioner:
-    int i;
+    int i,k;
     double c;
-    CEntry *e;
+
+    if ((int)csrDiag.size() != n) FlattenMatrix();
 
     c= Lambda*(2.-Lambda);
     for(i=0; i<n; i++) Y[i]=X[i]*c;
@@ -211,27 +243,25 @@ void CBigLinProb::MultPC(const double *X, double *Y)
     // invert Lower Triangle;
     for(i=0; i<n; i++)
     {
-        Y[i]/= M[i]->x;
-        e=M[i]->next;
-        while(e!=NULL)
+        Y[i]/= csrDiag[i];
+        const double yl = Y[i] * Lambda;
+        for(k=csrRowStart[i]; k<csrRowStart[i+1]; k++)
         {
-            Y[e->c] -= e->x * Y[i] * Lambda;
-            e=e->next;
+            Y[csrCol[k]] -= csrVal[k] * yl;
         }
     }
 
-    for(i=0; i<n; i++) Y[i]*=M[i]->x;
+    for(i=0; i<n; i++) Y[i]*=csrDiag[i];
 
     // invert Upper Triangle
     for(i=n-1; i>=0; i--)
     {
-        e=M[i]->next;
-        while(e!=NULL)
+        double yi = Y[i];
+        for(k=csrRowStart[i]; k<csrRowStart[i+1]; k++)
         {
-            Y[i] -= e->x * Y[e->c] * Lambda;
-            e=e->next;
+            yi -= csrVal[k] * Y[csrCol[k]] * Lambda;
         }
-        Y[i]/= M[i]->x;
+        Y[i] = yi / csrDiag[i];
     }
 }
 
@@ -241,8 +271,13 @@ bool CBigLinProb::PCGSolve(int flag)
     double res,res_o,res_new;
     double er,del,rho,pAp;
 
+    // copy the assembled matrix into flat arrays for fast traversal;
+    // must be redone on every call because the nonlinear solvers
+    // modify the matrix between calls.
+    FlattenMatrix();
+
     // quick check for most obvious sign of singularity;
-    for(i=0; i<n; i++) if(M[i]->x==0)
+    for(i=0; i<n; i++) if(csrDiag[i]==0)
         {
             fprintf(stderr,"singular flag tripped at %i of %i\n", i,n);
             return 0;
