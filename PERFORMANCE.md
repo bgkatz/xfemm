@@ -294,3 +294,62 @@ Files: `cfemm/libfemm/CMaterialProp.cpp`.
   MAXITER).
 - B-H `GetH`/`GetdHdB` do a linear scan of the curve per element per Newton
   iteration — small tables, low priority.
+## 10. motoropt-side work log
+
+- 2026-08-27: tier-1 extraction batching implemented in motoropt
+  (backends/base.py `mo_extract_batch`, LuaBackend single-script override,
+  batched `extract_flux_linkage`, `extract_torque_and_flux` used by
+  simulate_motor + sweep sliding-band path). 6 → 3 femmcli
+  processes/design, 1.41 → 1.08 s serial, MC 2m47s → 1m30s.
+
+## 11. Remaining time budget & next targets (as of 2026-08-27)
+
+Context: Ben's motoropt Monte Carlo (1000 designs) went 6m30s → 1m30s via
+items 1–7 plus tier-1 extraction batching in motoropt (mo_extract_batch:
+6 → 3 femmcli processes/design, results digit-identical, motoropt tests
+163/163). Serial per-design profile after batching (~1.1 s + worker spawn;
+profiler: motoropt/femm_temp/profile_backend.py):
+
+| Phase | Time | Share |
+|---|---|---|
+| femmcli analyze (mesh + solve) | 0.66 s | ~55% |
+| Python (geometry calc + Lua emission) | 0.29 s | ~24% |
+| extract_batch process | 0.10 s | ~8% |
+| setup process (draw + save .fem) | 0.03 s | ~3% |
+| worker python spawn (outside profile) | ~0.15–0.3 s | — |
+
+Candidate fixes, est. serial savings per design:
+
+- **Newton reassembly (xfemm)** — analyze's ~0.66 s is roughly 0.12 s
+  meshing + ~0.35 s of 12× full matrix reassembly + ~0.11 s LDLT solves +
+  I/O. The solver wipes and reassembles every element each Newton
+  iteration, but only nonlinear-material element contributions change:
+  cache the linear part (split b and M into fixed + nonlinear-delta),
+  reassemble only nonlinear elements per iteration. Est. −0.15 to −0.25 s.
+  Moderate effort, touches static2d/staticaxi assembly loops. A cheaper
+  partial: hoist the per-element sin/cos and Lua-magdir work (item 9).
+- **Tier-2 single femmcli process per design (motoropt)** — append
+  mi_analyze + mi_loadsolution + extraction prints to the setup script:
+  3 processes → 1, and the .fem/.ans re-parses disappear. Est. −0.10 to
+  −0.15 s serial, likely more under parallel contention (tier 1
+  over-delivered for exactly that reason).
+- **Persistent workers (motoropt)** — runner spawns `python -m ..._worker`
+  per design; a worker that loops over designs amortizes interpreter+numpy
+  startup. Est. −0.15 to −0.25 s per design.
+- **Python emission profile (motoropt)** — 0.29 s to generate a 2457-line
+  Lua string looks high; cProfile it (suspects: per-call string formatting,
+  geometry recalc, YAML/spec copies). Unknown until measured; maybe half.
+- **fpproc .ans loader (xfemm)** — port FileTokenizer (item 5) to fpproc's
+  fgets/sscanf solution parser; shrinks every extraction/femmcli
+  mi_loadsolution. Mostly subsumed by tier 2, worthwhile independently for
+  interactive post-processing and the losses sweep (36 steps × loads).
+- **Mesh density (model-side)** — meshing is ~0.12 s and solve cost scales
+  with node count; if MC fidelity allows a coarser mesh in the far field,
+  everything downstream shrinks. Zero code.
+- **/arch:AVX2 for MSVC Release (xfemm)** — cheap global flag; maybe
+  5–15% on solve kernels. Verify no behavior change.
+
+Realistic stack (reassembly + tier 2 + persistent workers): ~1.1 s →
+~0.5–0.65 s serial per design, i.e. MC ≈ 45–60 s. Diminishing returns
+beyond that without threading the solve or batching designs per process.
+
