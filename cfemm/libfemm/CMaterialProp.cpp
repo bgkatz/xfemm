@@ -84,6 +84,7 @@ CMMaterialProp::CMMaterialProp()
     , WireD(0)
     , mu_fdx()
     , mu_fdy()
+    , MuMax(0.)
     , Frequency(0.)
 {
 }
@@ -117,6 +118,13 @@ CMMaterialProp::CMMaterialProp( const CMMaterialProp& other )
     WireD = other.WireD;
     LamFill = other.LamFill;            // lamination fill factor;
     LamType = other.LamType;            // type of lamination;
+
+    // frequency-dependent state; failing to copy these left them
+    // uninitialized (notably MuMax, which GetMu reads as a flag)
+    mu_fdx = other.mu_fdx;
+    mu_fdy = other.mu_fdy;
+    MuMax = other.MuMax;
+    Frequency = other.Frequency;
 }
 
 void CMMaterialProp::clearSlopes()

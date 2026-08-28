@@ -79,4 +79,16 @@ target_include_directories(femm
     $<INSTALL_INTERFACE:include>
     )
 target_link_libraries(femm PUBLIC luacomplex)
+
+# Optional Eigen-based sparse direct solver.  If a copy of Eigen is
+# present in cfemm/external, spars.cpp gains an LDLT direct-solve path,
+# used by default (set XFEMM_DIRECT=0 in the environment to force the
+# legacy PCG solver).  EIGEN_MPL2_ONLY guarantees at compile time that
+# only MPL2-licensed Eigen code is included (any LGPL-licensed file
+# would trigger a compile error).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../external/eigen-3.4.0/Eigen")
+    message(STATUS "Eigen found in cfemm/external - enabling XFEMM_HAVE_EIGEN direct solver")
+    target_include_directories(femm PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../external/eigen-3.4.0")
+    target_compile_definitions(femm PRIVATE XFEMM_HAVE_EIGEN EIGEN_MPL2_ONLY)
+endif()
 # vi:expandtab:tabstop=4 shiftwidth=4:

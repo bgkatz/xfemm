@@ -193,17 +193,99 @@ produce -O0 binaries on a plain `cmake .. && make` — easily 5-15x slower.
 Fix: default to Release when unset on single-config generators. (MSVC
 multi-config builds are unaffected.)
 
-## 7. Parallelism — IDEAS / NOT SCOPED
+## 7. Eigen LDLT direct solver — PROTOTYPED (2026-08-27)
+
+**Change:** vendored Eigen 3.4.0 under `cfemm/external/eigen-3.4.0`
+(auto-detected by `libfemm/CMakeLists.txt`, which then defines
+`XFEMM_HAVE_EIGEN`; builds without it are unchanged). `CBigLinProb` gains
+`SolveDirect()`: the symmetric upper-triangle CSR arrays from item 1 map
+directly to Eigen's column-major lower triangle (zero-transform), feeding
+`SimplicialLDLT`. Runtime opt-in via environment variable:
+`XFEMM_DIRECT=1` = factorize+solve every call (symbolic analysis reused);
+`XFEMM_DIRECT=2` = factorize once, then CG preconditioned with the stale
+factorization, refactorizing on slow convergence; unset = existing PCG.
+Falls back to PCG automatically if factorization fails.
+
+**Results:** mode 1 wins everywhere — factorization is so cheap in 2D
+(8–9 ms at 26k nodes, ~0.4 s at 148k) that mode 2's stale-preconditioner CG
+is never worth it at these sizes.
+
+Solve-phase comparison (all Newton steps summed):
+
+| Model | PCG (post item 1) | LDLT mode 1 | Solve speedup |
+|---|---|---|---|
+| motor (12 solves) | 1.07 s | ~0.11 s | **~10x** |
+| tq_dense (1 solve, 525 iters) | 1.27 s | 0.42 s | 3.0x |
+
+End-to-end (best of 3), XFEMM_DIRECT=1:
+
+| Model | Baseline | After items 1/3/4/5 (PCG) | LDLT | vs baseline |
+|---|---|---|---|---|
+| temp | 0.333 s | 0.165 s | 0.113 s | 2.9x |
+| motor | 3.15 s | 1.52 s | **0.61 s** | **5.1x** |
+| temp_dense | 3.29 s | 1.43 s | 1.03 s | 3.2x |
+| tq_dense | 5.09 s | 1.82 s | 1.03 s | **4.9x** |
+| age_dense | 4.90 s | 1.83 s | 1.04 s | 4.7x |
+
+Correctness: linear models agree with baseline to ~1e-11 (direct solve is
+exact; the diff is the baseline PCG's own convergence error). Nonlinear
+models differ by 2e-7 (motor) to 4e-6 (temp) relative — expected: an exact
+linear solve changes the Newton trajectory within the nonlinear stopping
+tolerance (res < 100×Precision); Newton iteration counts are unchanged
+(motor: 12). Default mode (env unset) is bit-identical to the item-5 build;
+full ctest 33/33.
+
+**Made the default (2026-08-27):** the direct solver is now used by default
+whenever the build finds Eigen; `XFEMM_DIRECT=0` forces the legacy PCG
+solver (bit-identical to the pre-Eigen build), `XFEMM_DIRECT=2` selects the
+stale-factorization hybrid. Applies to every `CBigLinProb` user (fsolver,
+esolver, hsolver, fpproc mask). Automatic PCG fallback if a factorization
+fails. Full ctest 33/33 with direct as default.
+
+**Licensing:** Eigen 3.4.0 is MPL2. The historically-LGPL sparse Cholesky
+code (Tim Davis's LDL) was relicensed to MPL2 via an agreement with Google
+(see the header of `Eigen/src/SparseCholesky/SimplicialCholesky_impl.h`),
+so our entire code path is MPL2. The build defines `EIGEN_MPL2_ONLY`,
+which turns any accidental inclusion of remaining LGPL-licensed files into
+a compile error — a machine-checked guarantee. MPL2 is file-level
+copyleft: shipping the unmodified source tree with its COPYING.* files
+(kept in `cfemm/external/eigen-3.4.0/`) satisfies it, and it composes fine
+with xfemm's Aladdin/FEMM-derived licensing and downstream commercial use.
+The vendored tree is trimmed to headers + licenses (6.8 MB).
+
+Remaining decision: vendored copy vs. git submodule vs. find_package with
+graceful fallback (currently: vendored, auto-detected, optional). Mode-2
+hybrid unmeasured on 500k+ meshes.
+
+## 7b. Uninitialized `MuMax` in CMMaterialProp — BUG FIXED (2026-08-27)
+
+Found while making the direct solver the default: `femmcli_fpproc.lua`
+flipped from flaky to consistently failing. Root cause (pre-existing,
+latent): `CMMaterialProp::MuMax` was never initialized in the default
+constructor, and the copy constructor failed to copy `MuMax`, `mu_fdx`,
+`mu_fdy`, and `Frequency` (all left uninitialized — the copy ctor bypasses
+the default init list). `GetMu()` uses `MuMax>0` as the
+incremental-permeability flag, so for linear materials (air, magnets —
+`GetSlopes` never runs for them) the flag read heap garbage. When the
+garbage was positive, point values of H and Mu in linear regions were
+silently corrupted for DC problems (`muinc = mu_x/B` → observed Mu1 ≈
+9.7e12 at B ≈ 1e-13 T). Heap-layout dependence explains the historical
+flakiness; Eigen's allocations merely made the garbage deterministic.
+Fixed by initializing `MuMax(0.)` and copying all four members. The fpproc
+test now passes 6/6 consecutive runs.
+
+Files: `cfemm/libfemm/CMaterialProp.cpp`.
+
+## 8. Parallelism — IDEAS / NOT SCOPED
 
 - OpenMP `MultA`/`Dot` now feasible on the CSR arrays (needs full-row storage
   or per-thread accumulators to handle the symmetric scatter).
 - SSOR preconditioner is inherently sequential; threaded alternative is
   (block-)Jacobi, which trades iterations for cores — benchmark, don't assume.
-- Alternative worth measuring: Eigen `SimplicialLDLT` direct solve; for
-  <~500k nodes a factorization is often faster than PCG outright, and Newton
-  steps could reuse the symbolic factorization.
+- Eigen factorization could also be swapped for CHOLMOD/Pardiso (threaded)
+  if the direct path becomes default and larger models demand it.
 
-## 8. Minor items — NOTED
+## 9. Minor items — NOTED
 
 - Hoist `cos(t*PI/180)`/`sin(t*PI/180)` out of the per-edge magnetization
   loop (`static2d.cpp:610`, computed 3x per element per Newton iteration).

@@ -28,7 +28,46 @@
 #include <cstdlib>
 #include <utility>
 
+#ifdef XFEMM_HAVE_EIGEN
+#include <Eigen/Sparse>
+#endif
+
 using std::swap;
+
+#ifdef XFEMM_HAVE_EIGEN
+// State for the experimental Eigen LDLT direct solver.  The linked-list
+// matrix is symmetric with only the upper triangle stored; the row-major
+// (diagonal + strictly-upper) CSR arrays are exactly the column-major
+// lower triangle of the same matrix, which is what SimplicialLDLT<...,
+// Eigen::Lower> consumes.
+class CBigLinProbDirect
+{
+public:
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>, Eigen::Lower> ldlt;
+    Eigen::SparseMatrix<double> A;
+    std::vector<int> rowStart;
+    std::vector<int> cols;
+    std::vector<double> vals;
+    bool analyzed = false;
+    bool factorized = false;
+};
+
+// Runtime selection of the solver.  The sparse direct solver (mode 1) is
+// the default; set XFEMM_DIRECT=0 in the environment to force the legacy
+// PCG solver, or XFEMM_DIRECT=2 for the experimental variant that reuses
+// a stale factorization as a CG preconditioner across Newton iterations.
+static int directSolveMode()
+{
+    static int mode = -1;
+    if (mode < 0)
+    {
+        const char *e = getenv("XFEMM_DIRECT");
+        mode = (e != nullptr) ? atoi(e) : 1;
+        if (mode < 0 || mode > 2) mode = 1;
+    }
+    return mode;
+}
+#endif
 
 
 CEntry::CEntry()
@@ -74,6 +113,11 @@ CBigLinProb::~CBigLinProb()
     free(M);
     free(Q);
     n = 0;
+
+#ifdef XFEMM_HAVE_EIGEN
+    delete directSolver;
+    directSolver = nullptr;
+#endif
 }
 
 int CBigLinProb::Create(int d, int bw)
@@ -333,6 +377,124 @@ void CBigLinProb::MultPC(const double *X, double *Y)
     }
 }
 
+bool CBigLinProb::SolveDirect(int flag)
+{
+#ifndef XFEMM_HAVE_EIGEN
+    (void)flag;
+    return false;
+#else
+    if (directSolver == nullptr) directSolver = new CBigLinProbDirect;
+    CBigLinProbDirect *ds = directSolver;
+
+    printf("Sparse Direct Solver\n");
+
+    // assemble the (diagonal + strictly-upper) CSR arrays into a single
+    // sorted structure and copy into an Eigen sparse matrix
+    {
+        int nnz = csrRowStart[n] + n;
+        ds->rowStart.resize(n+1);
+        ds->cols.resize(nnz);
+        ds->vals.resize(nnz);
+        int k = 0;
+        for(int i=0; i<n; i++)
+        {
+            ds->rowStart[i] = k;
+            ds->cols[k] = i;
+            ds->vals[k] = csrDiag[i];
+            k++;
+            for(int p=csrRowStart[i]; p<csrRowStart[i+1]; p++)
+            {
+                ds->cols[k] = csrCol[p];
+                ds->vals[k] = csrVal[p];
+                k++;
+            }
+        }
+        ds->rowStart[n] = k;
+
+        Eigen::Map<const Eigen::SparseMatrix<double> >
+                Amap(n, n, k, ds->rowStart.data(), ds->cols.data(), ds->vals.data());
+        ds->A = Amap;
+    }
+
+    Eigen::Map<Eigen::VectorXd> vb(b,n), vV(V,n), vR(R,n), vZ(Z,n);
+
+    if (directSolveMode() == 1 || !ds->factorized)
+    {
+        // factorize the current matrix and solve directly
+        if (!ds->analyzed)
+        {
+            ds->ldlt.analyzePattern(ds->A);
+            ds->analyzed = true;
+        }
+        ds->ldlt.factorize(ds->A);
+        if (ds->ldlt.info() != Eigen::Success)
+        {
+            fprintf(stderr,"LDLT factorization failed; falling back to PCG\n");
+            return false;
+        }
+        ds->factorized = true;
+        vV = ds->ldlt.solve(vb);
+        return true;
+    }
+
+    // mode 2 with an existing factorization: conjugate gradient on the
+    // *current* matrix, preconditioned with the stale factorization.
+    // The matrix drifts slowly between Newton iterations, so this
+    // usually converges in a handful of iterations.
+    int i,iters=0;
+    double res,res_o,res_new,er=0,del,rho,pAp;
+    const int maxStaleIters = 60;
+
+    vZ = ds->ldlt.solve(vb);
+    res_o = Dot(Z,b);
+    if (res_o==0) return true;
+
+    if (flag==0) for(i=0; i<n; i++) V[i]=0;
+
+    MultA(V,R);
+    for(i=0; i<n; i++) R[i]=b[i]-R[i];
+
+    vZ = ds->ldlt.solve(vR);
+    for(i=0; i<n; i++) P[i]=Z[i];
+    res = Dot(Z,R);
+
+    do
+    {
+        MultA(P,U);
+        pAp = Dot(P,U);
+        del = res/pAp;
+        for(i=0; i<n; i++)
+        {
+            V[i] += del*P[i];
+            R[i] -= del*U[i];
+        }
+        vZ = ds->ldlt.solve(vR);
+        res_new = Dot(Z,R);
+        rho = res_new/res;
+        res = res_new;
+        for(i=0; i<n; i++) P[i]=Z[i]+(rho*P[i]);
+        er = sqrt(fabs(res/res_o));
+        iters++;
+    }
+    while(er>Precision && iters<maxStaleIters);
+
+    if (er>Precision)
+    {
+        // stale preconditioner has drifted too far; refactorize the
+        // current matrix and finish directly
+        ds->ldlt.factorize(ds->A);
+        if (ds->ldlt.info() != Eigen::Success)
+        {
+            fprintf(stderr,"LDLT refactorization failed; falling back to PCG\n");
+            return false;
+        }
+        vV = ds->ldlt.solve(vb);
+    }
+
+    return true;
+#endif
+}
+
 bool CBigLinProb::PCGSolve(int flag)
 {
     int i;
@@ -350,6 +512,15 @@ bool CBigLinProb::PCGSolve(int flag)
             fprintf(stderr,"singular flag tripped at %i of %i\n", i,n);
             return 0;
         }
+
+#ifdef XFEMM_HAVE_EIGEN
+    // experimental direct-solve path, opt-in via XFEMM_DIRECT env var;
+    // falls through to PCG if the factorization fails
+    if (directSolveMode() != 0)
+    {
+        if (SolveDirect(flag)) return true;
+    }
+#endif
 
     // initialize progress bar;
 //	TheView->SetDlgItemText(IDC_FRAME1,"Conjugate Gradient Solver");

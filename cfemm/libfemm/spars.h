@@ -36,6 +36,9 @@ public:
 private:
 };
 
+// opaque state for the optional Eigen-based direct solver (see spars.cpp)
+class CBigLinProbDirect;
+
 
 class CBigLinProb
 {
@@ -114,6 +117,18 @@ private:
     // p<i side from colRows and the p>i side from row i's list) into
     // scratch, excluding row i itself
     void CollectColumnRows(int i, std::vector<int> &scratch);
+
+    // Experimental sparse-direct (Eigen LDLT) solve path.  Only active
+    // when the library is built with XFEMM_HAVE_EIGEN and the
+    // XFEMM_DIRECT environment variable is set:
+    //   XFEMM_DIRECT=1  factorize and solve directly on every call
+    //   XFEMM_DIRECT=2  factorize on the first call; later calls run CG
+    //                   preconditioned with the (stale) factorization and
+    //                   refactorize only if that converges slowly
+    // Returns false (falling back to PCG) if unavailable or if the
+    // factorization fails.
+    bool SolveDirect(int flag);
+    CBigLinProbDirect *directSolver = nullptr;
 };
 
 #endif
