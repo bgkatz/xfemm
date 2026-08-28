@@ -19,7 +19,7 @@ the script restores them before every run. Timing = full fsolver process
 | `temp_dense` | 83k | — | `temp` with mesh size / 3 |
 | `tq_dense` | 148k | 295k | `tq` with mesh size / 8 |
 | `age_dense` | 148k | 295k | `age` with mesh size / 8 |
-| `motor` | 26k | 51k | Ben's `50x14_custom.fem` (motoropt), nonlinear (13-pt + 47-pt BH), 12 Newton iters |
+| `motor` | 26k | 51k | real outrunner motor model (`50x14_custom.fem`), nonlinear (13-pt + 47-pt BH), 12 Newton iters |
 
 Correctness check for every change: relative L2 difference of the `.ans`
 solution vector vs. pre-change baseline, plus identical PCG iteration counts
@@ -259,9 +259,9 @@ hybrid unmeasured on 500k+ meshes.
 
 ## 7c. LDLT silent inaccuracy on indefinite Newton Jacobians — BUG FIXED (2026-08-27)
 
-Found via spurious motoropt MC results (jagged flux waveforms, phases not
-120° apart, 8x torque ripple on occasional designs — e.g. design 39054 in
-50x14.db). Root cause: `SimplicialLDLT` does no pivoting and has no
+Found via spurious Monte-Carlo results in the downstream motor-design
+toolbox (jagged flux waveforms, phases not 120° apart, 8x torque ripple on
+occasional designs). Root cause: `SimplicialLDLT` does no pivoting and has no
 convergence criterion; on some designs the nonlinear Newton Jacobian goes
 (numerically) indefinite once B-H updates kick in (cubic B-H spline
 overshoot can produce locally negative differential permeability), and the
@@ -279,8 +279,8 @@ merely-ill-conditioned cases; fall back to PCG if refinement stalls
 (genuinely indefinite). Cost: one mat-vec per healthy solve (~2 ms at
 148k nodes). Hostile designs run at pure-PCG speed (measured identical,
 1.91 s vs 1.91 s on the repro design) — no speedup there, but correct.
-Verified: design 39054 sweep now matches PCG exactly; healthy models
-unchanged; ctest 33/33.
+Verified: the failing design's sweep now matches PCG exactly; healthy
+models unchanged; ctest 33/33.
 
 Ops note: any femmcli/fsolver binaries deployed elsewhere must be rebuilt
 to pick this up, and **MSBuild's up-to-date check twice failed to relink
@@ -327,13 +327,14 @@ Files: `cfemm/libfemm/CMaterialProp.cpp`.
   MAXITER).
 - B-H `GetH`/`GetdHdB` do a linear scan of the curve per element per Newton
   iteration — small tables, low priority.
-## 10. motoropt-side work log
+## 10. Downstream-toolbox work log
 
-- 2026-08-27: tier-1 extraction batching implemented in motoropt
-  (backends/base.py `mo_extract_batch`, LuaBackend single-script override,
-  batched `extract_flux_linkage`, `extract_torque_and_flux` used by
-  simulate_motor + sweep sliding-band path). 6 → 3 femmcli
-  processes/design, 1.41 → 1.08 s serial, MC 2m47s → 1m30s.
+- 2026-08-27: tier-1 extraction batching implemented in the motor-design
+  toolbox that drives xfemm (backends/base.py `mo_extract_batch`,
+  LuaBackend single-script override, batched `extract_flux_linkage`,
+  `extract_torque_and_flux` used by simulate_motor + sweep sliding-band
+  path). 6 → 3 femmcli processes/design, 1.41 → 1.08 s serial,
+  MC 2m47s → 1m30s.
 - 2026-08-28: production validation — 200k-design overnight MC (6s/7p)
   at a sustained 540 motors/min with zero observed spurious results,
   confirming the §7c residual guard holds at scale. Baseline throughput
@@ -342,11 +343,12 @@ Files: `cfemm/libfemm/CMaterialProp.cpp`.
 
 ## 11. Remaining time budget & next targets (as of 2026-08-27)
 
-Context: Ben's motoropt Monte Carlo (1000 designs) went 6m30s → 1m30s via
-items 1–7 plus tier-1 extraction batching in motoropt (mo_extract_batch:
-6 → 3 femmcli processes/design, results digit-identical, motoropt tests
-163/163). Serial per-design profile after batching (~1.1 s + worker spawn;
-profiler: motoropt/femm_temp/profile_backend.py):
+Context: a downstream Monte-Carlo motor-design pipeline (1000 designs)
+went 6m30s → 1m30s via items 1–7 plus tier-1 extraction batching in the
+toolbox (mo_extract_batch: 6 → 3 femmcli processes/design, results
+digit-identical, toolbox tests 163/163). Serial per-design profile after
+batching (~1.1 s + worker spawn; profiler: `femm_temp/profile_backend.py`
+in the toolbox repo):
 
 | Phase | Time | Share |
 |---|---|---|
@@ -366,15 +368,15 @@ Candidate fixes, est. serial savings per design:
   reassemble only nonlinear elements per iteration. Est. −0.15 to −0.25 s.
   Moderate effort, touches static2d/staticaxi assembly loops. A cheaper
   partial: hoist the per-element sin/cos and Lua-magdir work (item 9).
-- **Tier-2 single femmcli process per design (motoropt)** — append
+- **Tier-2 single femmcli process per design (toolbox)** — append
   mi_analyze + mi_loadsolution + extraction prints to the setup script:
   3 processes → 1, and the .fem/.ans re-parses disappear. Est. −0.10 to
   −0.15 s serial, likely more under parallel contention (tier 1
   over-delivered for exactly that reason).
-- **Persistent workers (motoropt)** — runner spawns `python -m ..._worker`
+- **Persistent workers (toolbox)** — runner spawns `python -m ..._worker`
   per design; a worker that loops over designs amortizes interpreter+numpy
   startup. Est. −0.15 to −0.25 s per design.
-- **Python emission profile (motoropt)** — 0.29 s to generate a 2457-line
+- **Python emission profile (toolbox)** — 0.29 s to generate a 2457-line
   Lua string looks high; cProfile it (suspects: per-call string formatting,
   geometry recalc, YAML/spec copies). Unknown until measured; maybe half.
 - **fpproc .ans loader (xfemm)** — port FileTokenizer (item 5) to fpproc's
