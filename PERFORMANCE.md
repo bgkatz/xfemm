@@ -257,6 +257,39 @@ Remaining decision: vendored copy vs. git submodule vs. find_package with
 graceful fallback (currently: vendored, auto-detected, optional). Mode-2
 hybrid unmeasured on 500k+ meshes.
 
+## 7c. LDLT silent inaccuracy on indefinite Newton Jacobians — BUG FIXED (2026-08-27)
+
+Found via spurious motoropt MC results (jagged flux waveforms, phases not
+120° apart, 8x torque ripple on occasional designs — e.g. design 39054 in
+50x14.db). Root cause: `SimplicialLDLT` does no pivoting and has no
+convergence criterion; on some designs the nonlinear Newton Jacobian goes
+(numerically) indefinite once B-H updates kick in (cubic B-H spline
+overshoot can produce locally negative differential permeability), and the
+factorization then reports Success while losing ~11 digits (measured
+relative residual ~3e-3 vs ~4e-14 on healthy matrices; iteration 1 with
+linear init is always fine, degradation starts at iteration 2). PCG never
+had this failure mode because its convergence criterion IS a residual
+check.
+
+Fix in `SolveDirect`: solve into scratch (Z) so the Newton warm start in V
+survives a failed attempt; verify an explicit relative residual
+||b−Ax||/||b|| against the solver Precision; run up to 5 passes of
+iterative refinement (one mat-vec + one triangular solve each) for
+merely-ill-conditioned cases; fall back to PCG if refinement stalls
+(genuinely indefinite). Cost: one mat-vec per healthy solve (~2 ms at
+148k nodes). Hostile designs run at pure-PCG speed (measured identical,
+1.91 s vs 1.91 s on the repro design) — no speedup there, but correct.
+Verified: design 39054 sweep now matches PCG exactly; healthy models
+unchanged; ctest 33/33.
+
+Ops note: any femmcli/fsolver binaries deployed elsewhere must be rebuilt
+to pick this up, and **MSBuild's up-to-date check twice failed to relink
+executables after libfemm changes** in this session — verify with
+`grep -c <new string> <exe>` or delete `bin/Release/*.exe` and rebuild.
+MC results produced between enabling the direct solver and this fix are
+suspect for a minority of designs (garbage is obvious: huge torque
+ripple / non-sinusoidal flux); re-simulate or filter those.
+
 ## 7b. Uninitialized `MuMax` in CMMaterialProp — BUG FIXED (2026-08-27)
 
 Found while making the direct solver the default: `femmcli_fpproc.lua`
@@ -301,6 +334,11 @@ Files: `cfemm/libfemm/CMaterialProp.cpp`.
   batched `extract_flux_linkage`, `extract_torque_and_flux` used by
   simulate_motor + sweep sliding-band path). 6 → 3 femmcli
   processes/design, 1.41 → 1.08 s serial, MC 2m47s → 1m30s.
+- 2026-08-28: production validation — 200k-design overnight MC (6s/7p)
+  at a sustained 540 motors/min with zero observed spurious results,
+  confirming the §7c residual guard holds at scale. Baseline throughput
+  before this effort was ~154 motors/min (6m30s / 1000 designs) on a
+  lighter config.
 
 ## 11. Remaining time budget & next targets (as of 2026-08-27)
 

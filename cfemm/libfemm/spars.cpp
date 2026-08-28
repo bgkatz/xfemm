@@ -30,6 +30,7 @@
 
 #ifdef XFEMM_HAVE_EIGEN
 #include <Eigen/Sparse>
+
 #endif
 
 using std::swap;
@@ -418,6 +419,48 @@ bool CBigLinProb::SolveDirect(int flag)
 
     Eigen::Map<Eigen::VectorXd> vb(b,n), vV(V,n), vR(R,n), vZ(Z,n);
 
+    // Solve A z = b with the current factorization, verify the solution
+    // against an explicit residual, and polish it with iterative
+    // refinement if needed.  SimplicialLDLT does no pivoting and has no
+    // convergence criterion of its own: on a near-indefinite matrix
+    // (nonlinear Newton Jacobians can go there via B-H spline overshoot)
+    // it reports Success but loses many digits, where PCG would simply
+    // have kept iterating.  Refinement recovers those digits at the cost
+    // of one mat-vec and one triangular solve per pass.  The candidate
+    // lives in Z until it passes the residual test, so a hopeless
+    // factorization leaves V (the Newton warm start) intact for the PCG
+    // fallback.  Returns false if refinement stalls.
+    auto solveWithRefinement = [&]() -> bool
+    {
+        vZ = ds->ldlt.solve(vb);
+
+        double relres = 0;
+        for (int pass=0; pass<6; pass++)
+        {
+            MultA(Z,U);
+            double num=0, den=0;
+            for(int j=0; j<n; j++)
+            {
+                R[j] = b[j]-U[j];
+                num += R[j]*R[j];
+                den += b[j]*b[j];
+            }
+            relres = (den==0) ? 0 : sqrt(num/den);
+            if (!(relres==relres)) break;       // NaN: hopeless
+            if (relres <= Precision) break;
+            vZ += ds->ldlt.solve(vR);
+        }
+
+        if (relres==relres && relres <= Precision)
+        {
+            vV = vZ;
+            return true;
+        }
+        fprintf(stderr,"direct solve residual %.1e exceeds Precision "
+                       "after refinement; falling back to PCG\n", relres);
+        return false;
+    };
+
     if (directSolveMode() == 1 || !ds->factorized)
     {
         // factorize the current matrix and solve directly
@@ -433,8 +476,7 @@ bool CBigLinProb::SolveDirect(int flag)
             return false;
         }
         ds->factorized = true;
-        vV = ds->ldlt.solve(vb);
-        return true;
+        return solveWithRefinement();
     }
 
     // mode 2 with an existing factorization: conjugate gradient on the
@@ -488,7 +530,7 @@ bool CBigLinProb::SolveDirect(int flag)
             fprintf(stderr,"LDLT refactorization failed; falling back to PCG\n");
             return false;
         }
-        vV = ds->ldlt.solve(vb);
+        return solveWithRefinement();
     }
 
     return true;
