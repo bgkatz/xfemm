@@ -22,14 +22,13 @@
 #include "femmcomplex.h"
 #include "spars.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
 
 using std::swap;
-
-#define KLUDGE
 
 
 CEntry::CEntry()
@@ -138,6 +137,9 @@ void CBigLinProb::Put(double v, int p, int q)
         m->c = q;
         m->x = v;
     }
+
+    // keep the column adjacency current if it has been built
+    if (!colRows.empty()) colRows[q].push_back(std::make_pair(p,m));
     return;
 }
 
@@ -161,7 +163,73 @@ double CBigLinProb::Get(int p, int q)
 
 void CBigLinProb::AddTo(double v, int p, int q)
 {
-	Put(Get(p,q)+v,p,q);
+    // single row walk; the old implementation was Put(Get(p,q)+v,p,q),
+    // which searched the row twice
+    CEntry *e,*l = NULL;
+
+    if (q<p)
+        swap(p,q);
+
+    e = M[p];
+
+    while ((e->c < q) && (e->next != NULL))
+    {
+        l = e;
+        e = e->next;
+    }
+
+    if (e->c == q)
+    {
+        e->x += v;
+        return;
+    }
+
+    CEntry *m = new CEntry;
+    m->c = q;
+    m->x = v;
+
+    if ((e->next == NULL) && (q > e->c))
+    {
+        e->next = m;
+    }
+    else
+    {
+        l->next = m;
+        m->next = e;
+    }
+
+    // keep the column adjacency current if it has been built
+    if (!colRows.empty()) colRows[q].push_back(std::make_pair(p,m));
+}
+
+void CBigLinProb::SyncColumnAdjacency()
+{
+    // once built, colRows is maintained incrementally by the insertion
+    // paths (Put/AddTo), so it never goes stale
+    if (!colRows.empty()) return;
+
+    colRows.resize(n);
+    for(int p=0; p<n; p++)
+    {
+        for(CEntry *e=M[p]->next; e!=NULL; e=e->next)
+        {
+            colRows[e->c].push_back(std::make_pair(p,e));
+        }
+    }
+}
+
+void CBigLinProb::CollectColumnRows(int i, std::vector<int> &scratch)
+{
+    // rows above the diagonal holding an entry in column i...
+    for(size_t k=0; k<colRows[i].size(); k++)
+    {
+        scratch.push_back(colRows[i][k].first);
+    }
+    // ...and, via symmetry, the columns of row i's own entries
+    for(CEntry *e=M[i]->next; e!=NULL; e=e->next)
+    {
+        scratch.push_back(e->c);
+    }
 }
 
 void CBigLinProb::FlattenMatrix()
@@ -352,32 +420,29 @@ bool CBigLinProb::PCGSolve(int flag)
 
 void CBigLinProb::SetValue(int i, double x)
 {
-    int k,fst,lst;
-    double z;
+    // visit just the structural entries of column i (rows above the
+    // diagonal) and row i (columns right of the diagonal) instead of
+    // scanning every row within the bandwidth
+    SyncColumnAdjacency();
 
-    if(bdw==0)
+    for(size_t k=0; k<colRows[i].size(); k++)
     {
-        fst=0;
-        lst=n;
-    }
-    else
-    {
-        fst=i-bdw;
-        if (fst<0) fst=0;
-        lst=i+bdw;
-        if (lst>n) lst=n;
-    }
-
-    for(k=fst; k<lst; k++)
-    {
-        z=Get(k,i);
-        if(z!=0)
+        CEntry *e=colRows[i][k].second;
+        if (e->x != 0)
         {
-            b[k]=b[k]-(z*x);
-            if(i!=k) Put(0.,k,i);
+            b[colRows[i][k].first] -= e->x * x;
+            e->x = 0.;
         }
     }
-    b[i]=Get(i,i)*x;
+    for(CEntry *e=M[i]->next; e!=NULL; e=e->next)
+    {
+        if (e->x != 0)
+        {
+            b[e->c] -= e->x * x;
+            e->x = 0.;
+        }
+    }
+    b[i]=M[i]->x * x;
 }
 
 void CBigLinProb::Wipe()
@@ -400,32 +465,27 @@ void CBigLinProb::Wipe()
 
 void CBigLinProb::AntiPeriodicity(int i, int j)
 {
-    int k,fst,lst;
     double v1,v2,c;
-
-#ifdef KLUDGE
-    int tmpbdw=bdw;
-    bdw=0;
-#endif
 
     if (j<i)
         swap(j,i);
 
-    if(bdw==0)
-    {
-        fst=0;
-        lst=n;
-    }
-    else
-    {
-        fst=i-bdw;
-        if (fst<0) fst=0;
-        lst=j+bdw;
-        if (lst>n) lst=n;
-    }
+    // visit just the rows holding a structural entry in column i or
+    // column j.  Older versions scanned every row of the matrix here
+    // (a banded scan was defeated by a KLUDGE that forced bdw=0,
+    // because earlier (Anti)Periodicity calls create entries outside
+    // the a-priori bandwidth which a banded scan would then miss).
+    SyncColumnAdjacency();
 
-    for(k=fst; k<lst; k++)
+    std::vector<int> ks;
+    CollectColumnRows(i,ks);
+    CollectColumnRows(j,ks);
+    std::sort(ks.begin(),ks.end());
+    ks.erase(std::unique(ks.begin(),ks.end()),ks.end());
+
+    for(size_t idx=0; idx<ks.size(); idx++)
     {
+        int k=ks[idx];
         if((k!=i) && (k!=j))
         {
             v1=Get(k,i);
@@ -437,7 +497,6 @@ void CBigLinProb::AntiPeriodicity(int i, int j)
                 Put(-c,k,j);
             }
         }
-        if((k==i+bdw) && (k<j-bdw) && (bdw!=0)) k=j-bdw;
     }
 
     c=0.5*(Get(i,i)+Get(j,j));
@@ -447,40 +506,27 @@ void CBigLinProb::AntiPeriodicity(int i, int j)
     c=0.5*(b[i]-b[j]);
     b[i]=c;
     b[j]=-c;
-
-#ifdef KLUDGE
-    bdw=tmpbdw;
-#endif
 }
 
 void CBigLinProb::Periodicity(int i, int j)
 {
-    int k,fst,lst;
     double v1,v2,c;
-
-#ifdef KLUDGE
-    int tmpbdw=bdw;
-    bdw=0;
-#endif
 
     if (j<i)
         swap(j,i);
 
-    if(bdw==0)
-    {
-        fst=0;
-        lst=n;
-    }
-    else
-    {
-        fst=i-bdw;
-        if (fst<0) fst=0;
-        lst=j+bdw;
-        if (lst>n) lst=n;
-    }
+    // see the comment in AntiPeriodicity
+    SyncColumnAdjacency();
 
-    for(k=fst; k<lst; k++)
+    std::vector<int> ks;
+    CollectColumnRows(i,ks);
+    CollectColumnRows(j,ks);
+    std::sort(ks.begin(),ks.end());
+    ks.erase(std::unique(ks.begin(),ks.end()),ks.end());
+
+    for(size_t idx=0; idx<ks.size(); idx++)
     {
+        int k=ks[idx];
         if((k!=i) && (k!=j))
         {
             v1=Get(k,i);
@@ -492,7 +538,6 @@ void CBigLinProb::Periodicity(int i, int j)
                 Put(c,k,j);
             }
         }
-        if((k==i+bdw) && (k<j-bdw) && (bdw!=0)) k=j-bdw;
     }
 
     c=(Get(i,i)+Get(j,j))/2.;
@@ -502,10 +547,6 @@ void CBigLinProb::Periodicity(int i, int j)
     c=0.5*(b[i]+b[j]);
     b[i]=c;
     b[j]=c;
-
-#ifdef KLUDGE
-    bdw=tmpbdw;
-#endif
 }
 
 

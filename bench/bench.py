@@ -23,7 +23,7 @@ def run(exe, model, reps):
 if __name__ == '__main__':
     exe = sys.argv[1]
     reps = int(sys.argv[2]) if len(sys.argv) > 2 else 3
-    models = sys.argv[3].split(',') if len(sys.argv) > 3 else ['temp', 'tq', 'age', 'temp_dense', 'tq_dense', 'age_dense']
+    models = sys.argv[3].split(',') if len(sys.argv) > 3 else ['temp', 'tq', 'age', 'motor', 'temp_dense', 'tq_dense', 'age_dense']
     print(f'=== {exe} ===')
     for m in models:
         ts = run(exe, m, reps)

@@ -31,6 +31,7 @@
 #include "femmcomplex.h"
 #include "femmconstants.h"
 #include "femmenums.h"
+#include "FileTokenizer.h"
 //#include "spars.h"
 #include "feasolver.h"
 
@@ -99,7 +100,6 @@ int FEASolver<PointPropT,BoundaryPropT,BlockPropT,CircuitPropT,BlockLabelT,MeshE
 ::Cuthill(bool deletefiles)
 {
 
-    FILE *fp;
     int i, n0, n1, n, newwide;
     long int j, n_lines;
     std::vector<std::vector<int>> ocon;
@@ -108,23 +108,50 @@ int FEASolver<PointPropT,BoundaryPropT,BlockPropT,CircuitPropT,BlockLabelT,MeshE
 
     // read in connectivity from nodefile
     sprintf(infile,"%s.edge",PathName.c_str());
-    if((fp=fopen(infile,"rt"))==NULL)
+
+    // parse the edge file once into an in-memory list, rather than
+    // making two fscanf passes over the file
+    std::vector<int> edges;
     {
-        //MsgBox("Couldn't open %s",infile);
-        printf("Couldn't open %s",infile);
-        return false;
+        femm::FileTokenizer edgeFile(infile);
+        if (!edgeFile.isOpen())
+        {
+            //MsgBox("Couldn't open %s",infile);
+            printf("Couldn't open %s",infile);
+            return false;
+        }
+        int tmp;
+        // read in number of lines
+        if (!edgeFile.nextInt(tmp))
+        {
+            printf("Couldn't read the number of lines");
+            return false;
+        }
+        n_lines=tmp;
+        // read in boundarymarker flag;
+        if (!edgeFile.nextInt(tmp))
+        {
+            printf("Couldn't read in the boundarymarker flag");
+            return false;
+        }
+
+        edges.reserve(2*n_lines);
+        for(i=0; i<n_lines; i++)
+        {
+            if (!edgeFile.nextInt(tmp) ||     // edge number
+                !edgeFile.nextInt(n0) ||
+                !edgeFile.nextInt(n1) ||
+                !edgeFile.nextInt(tmp))       // boundary marker
+            {
+                return false;
+            }
+            edges.push_back(n0);
+            edges.push_back(n1);
+        }
     }
-    // read in number of lines
-    if (fscanf(fp,"%li",&n_lines) != 1)
+    if (deletefiles)
     {
-        printf("Couldn't read the number of lines");
-        return false;
-    }
-    // read in boundarymarker flag;
-    if (fscanf(fp,"%li",&j) != 1)
-    {
-        printf("Couldn't read in the boundarymarker flag");
-        return false;
+        remove(infile);
     }
 
     // allocate storage for numbering
@@ -139,83 +166,29 @@ int FEASolver<PointPropT,BoundaryPropT,BlockPropT,CircuitPropT,BlockLabelT,MeshE
         newnum[i] = -1;
     }
 
-    // allocate space for connections;
-    //ocon[0].resize(2*n_lines);
-
     // with first pass, figure out how many connections
     // there are for each node;
     for(i=0; i<n_lines; i++)
     {
-        if (fscanf(fp,"%li",&j) != 1)
-        {
-            return false;
-        }
-        if (fscanf(fp,"%i",&n0) != 1)
-        {
-            return false;
-        }
-        if (fscanf(fp,"%i",&n1) != 1)
-        {
-            return false;
-        }
-        if (fscanf(fp,"%li",&j) != 1)
-        {
-            return false;
-        }
-
-        numcon[n0]++;
-        numcon[n1]++;
+        numcon[edges[2*i]]++;
+        numcon[edges[2*i+1]]++;
     }
 
     // mete out connection storage space;
     for(i=0, n=0; i<NumNodes; i++)
     {
-        //n += numcon[i-1];
-        //ocon[i] = ocon[0] + n;
         ocon[i].resize(numcon[i]);
     }
 
-    // on second pass through file, store connections;
-    rewind(fp);
-    // read in number of lines
-    if (fscanf(fp,"%li",&n_lines) != 1)
-    {
-        return false;
-    }
-    // read in boundarymarker flag;
-    if (fscanf(fp,"%li",&j) != 1)
-    {
-        return false;
-    }
-
+    // on second pass, store connections;
     for(i=0; i<n_lines; i++)
     {
-        if (fscanf(fp,"%li",&j) != 1) 
-        { 
-            return false; 
-        }
-        if (fscanf(fp,"%i",&n0) != 1) 
-        { 
-            return false; 
-        }
-        if (fscanf(fp,"%i",&n1) != 1) 
-        { 
-            return false; 
-        }
-        if (fscanf(fp,"%li",&j) != 1) 
-        { 
-            return false; 
-        }
-
+        n0=edges[2*i];
+        n1=edges[2*i+1];
         ocon[n0][nxtnum[n0]]=n1;
         nxtnum[n0]++;
         ocon[n1][nxtnum[n1]]=n0;
         nxtnum[n1]++;
-    }
-    fclose(fp);
-    if (deletefiles)
-    {
-        remove(infile);
     }
 
 

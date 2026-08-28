@@ -96,6 +96,24 @@ private:
 
     // copy the linked-list matrix M into the CSR arrays above
     void FlattenMatrix();
+
+    // Column adjacency: for each column q, the rows p<q holding an entry
+    // (p,q), as (row, entry pointer) pairs.  Together with row q's own
+    // list this gives all structural neighbors of node q, letting
+    // SetValue and (Anti)Periodicity visit only the O(degree) entries of
+    // a column instead of scanning O(n) rows.  Built lazily by
+    // SyncColumnAdjacency; once built it is kept current by the
+    // insertion paths (Put/AddTo), and entries are never deleted or
+    // moved, so the pointers stay valid for the life of the matrix.
+    std::vector<std::vector<std::pair<int,CEntry*> > > colRows;
+
+    // build colRows from the current matrix structure if not built yet
+    void SyncColumnAdjacency();
+
+    // collect the rows of all structural entries in column i (both the
+    // p<i side from colRows and the p>i side from row i's list) into
+    // scratch, excluding row i itself
+    void CollectColumnRows(int i, std::vector<int> &scratch);
 };
 
 #endif

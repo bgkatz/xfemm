@@ -32,6 +32,7 @@
 #include <CAirGapElement.h>
 #include <CNode.h>
 #include <femmcomplex.h>
+#include <FileTokenizer.h>
 #include <fparse.h>
 #include <fsolver.h>
 #include <LuaInstance.h>
@@ -363,35 +364,42 @@ LoadMeshErr FSolver::LoadMesh(bool deleteFiles)
 
     //read meshnodes;
     sprintf(infile,"%s.node",PathName.c_str());
-    if((fp=fopen(infile,"rt"))==NULL)
     {
-        return BADNODEFILE;
+        femm::FileTokenizer nodeFile(infile);
+        if (!nodeFile.isOpen())
+        {
+            return BADNODEFILE;
+        }
+        nodeFile.nextInt(k);
+        nodeFile.skipLine();
+        NumNodes = k;
+
+        const double lengthConv = 100 * LengthConvMeters[LengthUnits];
+
+        meshnode.clear();
+        meshnode.shrink_to_fit();
+        meshnode.reserve(k);
+        CNode node;
+        for(i=0; i<k; i++)
+        {
+            if (!nodeFile.nextInt(j) ||
+                !nodeFile.nextDouble(node.x) ||
+                !nodeFile.nextDouble(node.y) ||
+                !nodeFile.nextInt(j))
+            {
+                return BADNODEFILE;
+            }
+            if(j>1) j=j-2;
+            else j=-1;
+            node.BoundaryMarker=j;
+
+            // convert all lengths to centimeters (better conditioning this way...)
+            node.x *= lengthConv;
+            node.y *= lengthConv;
+
+            meshnode.push_back (node);
+        }
     }
-    fgets(s,1024,fp);
-    sscanf(s,"%i",&k);
-    NumNodes = k;
-
-    meshnode.clear();
-    meshnode.shrink_to_fit();
-    meshnode.reserve(k);
-    CNode node;
-    for(i=0; i<k; i++)
-    {
-        fscanf(fp,"%i",&j);
-        fscanf(fp,"%lf",&node.x);
-        fscanf(fp,"%lf",&node.y);
-        fscanf(fp,"%i",&j);
-        if(j>1) j=j-2;
-        else j=-1;
-        node.BoundaryMarker=j;
-
-        // convert all lengths to centimeters (better conditioning this way...)
-        node.x *= 100 * LengthConvMeters[LengthUnits];
-        node.y *= 100 * LengthConvMeters[LengthUnits];
-
-        meshnode.push_back (node);
-    }
-    fclose(fp);
 
     //read in periodic boundary conditions;
     sprintf(infile,"%s.pbc",PathName.c_str());
@@ -526,95 +534,98 @@ LoadMeshErr FSolver::LoadMesh(bool deleteFiles)
         WarnMessage(buf);
     }
 #endif // DEBUG
-    if((fp=fopen(infile,"rt"))==NULL)
     {
-        return BADELEMENTFILE;
-    }
-    fgets(s,1024,fp);
-    sscanf(s,"%i",&k);
-    NumEls = k;
-
-    meshele.clear();
-    meshele.shrink_to_fit();
-    meshele.reserve(k);
-    femmsolver::CMElement elm;
-
-    // get the default label for unlabelled blocks
-    int defaultLabel;
-    for(i=0,defaultLabel=-1; i<NumBlockLabels; i++)
-    {
-        if (labellist[i].IsDefault)
+        femm::FileTokenizer eleFile(infile);
+        if (!eleFile.isOpen())
         {
-            defaultLabel = i;
+            return BADELEMENTFILE;
         }
-    }
+        eleFile.nextInt(k);
+        eleFile.skipLine();
+        NumEls = k;
 
-    for(i=0; i<k; i++)
-    {
-        fscanf(fp,"%i",&j);
-        fscanf(fp,"%i",&elm.p[0]);
-        fscanf(fp,"%i",&elm.p[1]);
-        fscanf(fp,"%i",&elm.p[2]);
-        fscanf(fp,"%i",&elm.lbl);
-        elm.lbl--;
+        meshele.clear();
+        meshele.shrink_to_fit();
+        meshele.reserve(k);
+        femmsolver::CMElement elm;
 
-        if(elm.lbl<0)
+        // get the default label for unlabelled blocks
+        int defaultLabel;
+        for(i=0,defaultLabel=-1; i<NumBlockLabels; i++)
         {
-            elm.lbl = defaultLabel;
-        }
-
-        if(elm.lbl<0)
-        {
-
-            string msg = "Material properties have not been defined for all regions.\n";
-            char buf[1028]; SNPRINTF(buf, sizeof(buf), "The element number %i had label %i\n", i, elm.lbl);
-            msg += std::string (buf);
-            WarnMessage(msg.c_str());
-            fclose(fp);
-            if (deleteFiles)
+            if (labellist[i].IsDefault)
             {
-                sprintf(infile,"%s.ele",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.node",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.pbc",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.poly",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.edge",PathName.c_str());
-                remove(infile);
+                defaultLabel = i;
             }
-            return MISSINGMATPROPS;
         }
 
-        if (!(elm.lbl < (int)labellist.size()))
+        for(i=0; i<k; i++)
         {
-            char buf[1028];
-            SNPRINTF(buf, sizeof(buf), "The element number %i had label %i which is greater than the number of available labels (%i)\n", i+1, elm.lbl+1, (int)labellist.size());
-            WarnMessage(buf);
-            fclose(fp);
-            if (deleteFiles)
+            if (!eleFile.nextInt(j) ||
+                !eleFile.nextInt(elm.p[0]) ||
+                !eleFile.nextInt(elm.p[1]) ||
+                !eleFile.nextInt(elm.p[2]) ||
+                !eleFile.nextInt(elm.lbl))
             {
-                sprintf(infile,"%s.ele",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.node",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.pbc",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.poly",PathName.c_str());
-                remove(infile);
-                sprintf(infile,"%s.edge",PathName.c_str());
-                remove(infile);
+                return BADELEMENTFILE;
             }
-            return ELMLABELTOOBIG;
+            elm.lbl--;
+
+            if(elm.lbl<0)
+            {
+                elm.lbl = defaultLabel;
+            }
+
+            if(elm.lbl<0)
+            {
+
+                string msg = "Material properties have not been defined for all regions.\n";
+                char buf[1028]; SNPRINTF(buf, sizeof(buf), "The element number %i had label %i\n", i, elm.lbl);
+                msg += std::string (buf);
+                WarnMessage(msg.c_str());
+                if (deleteFiles)
+                {
+                    sprintf(infile,"%s.ele",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.node",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.pbc",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.poly",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.edge",PathName.c_str());
+                    remove(infile);
+                }
+                return MISSINGMATPROPS;
+            }
+
+            if (!(elm.lbl < (int)labellist.size()))
+            {
+                char buf[1028];
+                SNPRINTF(buf, sizeof(buf), "The element number %i had label %i which is greater than the number of available labels (%i)\n", i+1, elm.lbl+1, (int)labellist.size());
+                WarnMessage(buf);
+                if (deleteFiles)
+                {
+                    sprintf(infile,"%s.ele",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.node",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.pbc",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.poly",PathName.c_str());
+                    remove(infile);
+                    sprintf(infile,"%s.edge",PathName.c_str());
+                    remove(infile);
+                }
+                return ELMLABELTOOBIG;
+            }
+
+            // look up block type out of the list of block labels
+            elm.blk = labellist[elm.lbl].BlockType;
+
+            meshele.push_back(elm);
         }
-
-        // look up block type out of the list of block labels
-        elm.blk = labellist[elm.lbl].BlockType;
-
-        meshele.push_back(elm);
     }
-    fclose(fp);
 
     // initialize edge bc's and element permeabilities;
     for(i=0; i<NumEls; i++)
@@ -659,44 +670,47 @@ LoadMeshErr FSolver::LoadMesh(bool deleteFiles)
         }
 
     sprintf(infile,"%s.edge",PathName.c_str());
-    if((fp=fopen(infile,"rt"))==NULL)
     {
-        return BADEDGEFILE;
-    }
-    fscanf(fp,"%i",&k);// read in number of lines
-
-    fscanf(fp,"%i",&j);// read in boundarymarker flag;
-    for(i=0; i<k; i++)
-    {
-        fscanf(fp,"%i",&j);
-        fscanf(fp,"%i",&n0);
-        fscanf(fp,"%i",&n1);
-        fscanf(fp,"%i",&j);
-
-        if(j<0)
+        femm::FileTokenizer edgeFile(infile);
+        if (!edgeFile.isOpen())
         {
-            j = -(j+2);
-            // search through elements to find one containing the line;
-            // set corresponding edge equal to the bc number.
-            for(q=0; q<nmbr[n0]; q++)
-            {
-                elm=meshele[mbr[n0][q]];
-
-                if ((elm.p[0] == n0) && (elm.p[1] == n1)) elm.e[0]=j;
-                if ((elm.p[0] == n1) && (elm.p[1] == n0)) elm.e[0]=j;
-
-                if ((elm.p[1] == n0) && (elm.p[2] == n1)) elm.e[1]=j;
-                if ((elm.p[1] == n1) && (elm.p[2] == n0)) elm.e[1]=j;
-
-                if ((elm.p[2] == n0) && (elm.p[0] == n1)) elm.e[2]=j;
-                if ((elm.p[2] == n1) && (elm.p[0] == n0)) elm.e[2]=j;
-
-                meshele[mbr[n0][q]]=elm;
-            }
+            return BADEDGEFILE;
         }
+        edgeFile.nextInt(k);// read in number of lines
 
+        edgeFile.nextInt(j);// read in boundarymarker flag;
+        for(i=0; i<k; i++)
+        {
+            if (!edgeFile.nextInt(j) ||
+                !edgeFile.nextInt(n0) ||
+                !edgeFile.nextInt(n1) ||
+                !edgeFile.nextInt(j))
+            {
+                return BADEDGEFILE;
+            }
+
+            if(j<0)
+            {
+                j = -(j+2);
+                // search through elements to find one containing the line;
+                // set corresponding edge equal to the bc number.
+                for(q=0; q<nmbr[n0]; q++)
+                {
+                    femmsolver::CMElement &elm=meshele[mbr[n0][q]];
+
+                    if ((elm.p[0] == n0) && (elm.p[1] == n1)) elm.e[0]=j;
+                    if ((elm.p[0] == n1) && (elm.p[1] == n0)) elm.e[0]=j;
+
+                    if ((elm.p[1] == n0) && (elm.p[2] == n1)) elm.e[1]=j;
+                    if ((elm.p[1] == n1) && (elm.p[2] == n0)) elm.e[1]=j;
+
+                    if ((elm.p[2] == n0) && (elm.p[0] == n1)) elm.e[2]=j;
+                    if ((elm.p[2] == n1) && (elm.p[0] == n0)) elm.e[2]=j;
+                }
+            }
+
+        }
     }
-    fclose(fp);
 
     // free up the connectivity information
     free(nmbr);
@@ -1211,6 +1225,7 @@ double FSolver::ElmArea(int i)
     return 0.0001 * (b0*c1 - b1*c0) / 2.;
 
 }
+
 
 bool FSolver::runSolver(bool verbose)
 {

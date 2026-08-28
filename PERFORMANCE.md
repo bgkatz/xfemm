@@ -76,8 +76,7 @@ Correctness: PCG iteration counts identical per Newton step on all models;
 solution rel-L2 diff vs. baseline 1e-14 to 9e-12 (floating-point
 reassociation only, far below solver Precision).
 
-Status: implemented, benchmarked, **not yet committed** (working tree on
-`linear-planar-age`).
+Status: implemented, benchmarked, committed.
 
 ---
 
@@ -85,35 +84,106 @@ Status: implemented, benchmarked, **not yet committed** (working tree on
 
 `cfemm/libfemm/cspars.cpp` (`CBigComplexLinProb`, used for AC problems) has
 the same linked-list structure, and stores up to four matrices (`M`, `Mh`,
-`Ma`, `Ms`) for Newton AC problems. Mechanical port of item 1. Needs an AC
-benchmark model (e.g. a frequency≠0 variant of one of the existing models).
+`Ma`, `Ms`) for Newton AC problems. Mechanical port of item 1. Items 3/4
+apply to `cspars.cpp` too. Needs an AC benchmark model (e.g. a frequency≠0
+variant of one of the existing models).
 
-## 3. Single-walk `AddTo` — PLANNED
+## 3. Single-walk `AddTo` — IMPLEMENTED (2026-08-27, with item 4)
 
-`spars.cpp`: `AddTo(v,p,q)` is `Put(Get(p,q)+v,p,q)` — two linked-list row
-walks per assembly insertion. One combined walk (add in place, insert if
-absent) halves assembly search cost. Matters more now: on the nonlinear
-`motor` model, the 12x reassembly + BC application is ~0.9 s of the remaining
-1.95 s runtime. Same treatment applies to `cspars.cpp`.
+**Problem:** `spars.cpp`: `AddTo(v,p,q)` was `Put(Get(p,q)+v,p,q)` — two
+linked-list row walks per assembly insertion (~9 AddTo calls per element per
+Newton iteration, 55 per air-gap quad element).
 
-## 4. `Periodicity`/`AntiPeriodicity` KLUDGE full scans — PLANNED
+**Change:** single combined walk — add in place if the entry exists, insert
+if absent. Bit-identical arithmetic.
 
-`spars.cpp:366-474` (pre-change line numbers): `#define KLUDGE` forces
-`bdw=0`, so each periodic node pair scans all n rows with two `Get()` calls
-per row, re-applied every Newton iteration. Cost is NumPBCs × NumNodes row
-walks per Newton step — hits sliding-band / (anti)periodic motor models
-specifically. Fix: restore the banded scan (understand what the kludge
-papered over first) or maintain a column-adjacency structure. `SetValue`
-(Dirichlet BCs) has a smaller variant of the same pattern.
+## 4. Column adjacency for `SetValue`/`Periodicity`/`AntiPeriodicity` — IMPLEMENTED (2026-08-27)
 
-## 5. Fast mesh-file parsing — PLANNED
+**Problem:** `(Anti)Periodicity` carried a `#define KLUDGE` forcing `bdw=0`,
+so each periodic node pair scanned **all n rows** with two `Get()` row walks
+each, re-applied every Newton iteration. (The kludge existed because
+periodicity itself creates entries outside the a-priori bandwidth, which the
+original banded scan would then miss on later calls.) Cost: NumPBCs ×
+NumNodes row walks per Newton step — motor: 158 pairs × 26k rows × 12 iters,
+tq_dense/age_dense: 720 pairs × 148k rows. `SetValue` (Dirichlet BCs) had a
+banded variant of the same scan.
 
-`fsolver.cpp LoadMesh()`: per-token `fscanf` (4 calls/node, 5+/element; MSVC
-fscanf is slow and locks the stream per call). At 148k nodes / 295k elements
-this plus assembly is ~2 s of the 3.26 s remaining on `tq_dense` — now the
-majority of end-to-end time for linear models. Fix: read whole file, parse
-with `strtol`/`strtod`. Same pattern in `.ans` writing (per-value fprintf)
-and in `cuthill.cpp` (reads the .edge file with fscanf, twice).
+**Change:** added a lazily-built column adjacency (`colRows`: for each
+column, the (row, entry-pointer) pairs above the diagonal). Once built it is
+maintained incrementally by the insertion paths (`Put`/`AddTo`), so it never
+goes stale; entry pointers are stable because entries are never deleted.
+`SetValue` now touches only the O(degree) structural entries of the node's
+column/row; `(Anti)Periodicity` visits only rows holding an entry in either
+paired column (collected, sorted, deduped — ~16 rows instead of n). The
+KLUDGE and the banded-scan logic are gone.
+
+Files: `cfemm/libfemm/spars.h`, `cfemm/libfemm/spars.cpp`.
+
+**Results (items 3+4 together, end-to-end fsolver process time):**
+
+| Model | Baseline | CSR (item 1) | + items 3/4 | vs CSR | vs baseline |
+|---|---|---|---|---|---|
+| temp | 0.333 s | 0.279 s | 0.211 s | 1.32x | 1.58x |
+| tq | 0.085 s | 0.076 s | 0.066 s | 1.15x | 1.29x |
+| age | 0.083 s | 0.077 s | 0.063 s | 1.22x | 1.32x |
+| temp_dense | 3.29 s | 2.28 s | 1.73 s | 1.32x | **1.90x** |
+| tq_dense | 5.09 s | 3.23 s | 2.37 s | 1.36x | **2.14x** |
+| age_dense | 4.90 s | 3.25 s | 2.36 s | 1.38x | **2.07x** |
+| motor | 3.15 s | 1.95 s | 1.66 s | 1.18x | **1.90x** |
+
+Correctness: solution `.ans` files are bit-identical to the item-1 build on
+all seven models (rel-L2 diffs vs. original baseline unchanged to the last
+digit); full ctest suite 33/33 passed. Note: `femmcli_fpproc.lua` now passes
+and failed at baseline — this test is environmental/flaky (it fails/passes
+consistently within a build tree state, its bad values look like stale
+data, and `makemask.cpp` doesn't use any of the changed code paths);
+tracked as unrelated.
+
+## 5. Fast mesh-file parsing — IMPLEMENTED (2026-08-27)
+
+**Problem:** `fsolver.cpp LoadMesh()` parsed .node/.ele/.edge with per-token
+`fscanf` (4 calls/node, 5/element, 4/edge; MSVC fscanf locks the stream and
+re-parses the format string per call), and `cuthill.cpp` parsed the .edge
+file **twice** the same way. Measured phase breakdown before the fix
+(tq_dense, 148k nodes / 294k elements / 441k edges): loadmesh 0.36 s,
+cuthill 0.47 s — together ~35% of the remaining runtime.
+
+**Change:** new header-only `cfemm/libfemm/FileTokenizer.h` — reads the
+whole file into memory and hands out whitespace-separated tokens via
+`strtol`/`strtod`. Used for the .node/.ele/.edge loops in `LoadMesh` (the
+small .pbc/AGE section keeps its line-oriented parser) and in `Cuthill()`,
+which now parses .edge once into an in-memory edge list instead of two
+fscanf passes. Token-stream semantics identical to the fscanf sequence it
+replaces (with added truncated-file error checks). `Cuthill()` is a
+FEASolver template method, so esolver/hsolver inherit the fix.
+
+Files: `cfemm/libfemm/FileTokenizer.h` (new), `cfemm/fsolver/fsolver.cpp`,
+`cfemm/libfemm/cuthill.cpp`.
+
+**Results:** phase times on tq_dense: loadmesh 0.36 s → 0.09 s (3.8x),
+cuthill 0.47 s → 0.22 s (2.1x; the remainder is the renumbering algorithm
+itself, not I/O). End-to-end:
+
+| Model | Baseline | + items 1/3/4 | + item 5 | vs baseline |
+|---|---|---|---|---|
+| temp | 0.333 s | 0.211 s | 0.165 s | 2.02x |
+| tq | 0.085 s | 0.066 s | 0.049 s | 1.73x |
+| age | 0.083 s | 0.063 s | 0.049 s | 1.69x |
+| motor | 3.15 s | 1.66 s | 1.52 s | **2.07x** |
+| temp_dense | 3.29 s | 1.73 s | 1.43 s | **2.30x** |
+| tq_dense | 5.09 s | 2.37 s | 1.82 s | **2.80x** |
+| age_dense | 4.90 s | 2.36 s | 1.83 s | **2.68x** |
+
+Correctness: `.ans` solution diffs vs. original baseline unchanged on all
+seven models (bit-identical to the item-1 build). ctest: no new failures;
+`femmcli_fpproc.lua` confirmed genuinely flaky — with a single fixed binary
+it passes 3/4 and fails 1/4 consecutive runs (nondeterministic test or
+uninitialized read in fpproc, pre-existing; solver outputs are verified
+deterministic).
+
+Remaining end-to-end breakdown after item 5 (tq_dense): assemble+solve
+~1.36 s (mostly PCG), cuthill algorithm ~0.22 s, .ans write ~0.15 s,
+loadmesh ~0.09 s.
 
 ## 6. Build system: no default CMAKE_BUILD_TYPE — PLANNED
 
