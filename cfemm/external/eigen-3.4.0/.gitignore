@@ -36,3 +36,8 @@ lapack/reference
 .settings
 Makefile
 !ci/build.gitlab-ci.yml
+
+# xfemm: the "core" pattern above matches Eigen/Core and Eigen/src/Core on
+# case-insensitive filesystems (Windows/macOS), silently dropping them from git.
+!/Eigen/Core
+!/Eigen/src/Core/
