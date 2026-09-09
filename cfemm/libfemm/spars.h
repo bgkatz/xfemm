@@ -81,6 +81,22 @@ public:
     double Dot(double *X, double *Y);
     void ComputeBandwidth();
 
+    // Pointer to the (p,q) entry, created (with value 0) if absent.
+    // Entries are never deleted or moved, so the pointer stays valid for
+    // the life of the matrix; assembly loops that revisit the same
+    // entries every Newton iteration can add through it directly instead
+    // of repeating the row walk AddTo does.
+    CEntry *Entry(int p, int q);
+
+    // Cache of the iteration-invariant part of a nonlinear system.
+    // SaveLinearPart() records the current value of every entry and of
+    // b; RestoreLinearPart() puts the matrix back into exactly that
+    // state (entries created since are zeroed).  A Newton loop assembles
+    // the linear elements once, saves, and then per iteration restores
+    // and adds only the nonlinear elements -- see FSolver::Static2D.
+    void SaveLinearPart();
+    void RestoreLinearPart();
+
 //		CFknDlg *TheView;
 
 private:
@@ -112,6 +128,12 @@ private:
 
     // build colRows from the current matrix structure if not built yet
     void SyncColumnAdjacency();
+
+    // SaveLinearPart snapshot: parallel arrays of entry pointer / value,
+    // plus a copy of b
+    std::vector<CEntry*> linEntries;
+    std::vector<double> linVals;
+    std::vector<double> linB;
 
     // collect the rows of all structural entries in column i (both the
     // p<i side from colRows and the p>i side from row i's list) into

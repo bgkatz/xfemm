@@ -33,6 +33,7 @@
 #endif
 #include <math.h>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
   #ifndef SNPRINTF
@@ -145,6 +146,151 @@ int FSolver::StaticAxisymmetric(CBigLinProb &L)
 
     // build element matrices using the matrices derived in Allaire's book.
 
+    // Field-dependent (B-H curve) elements, registered during the Iter 0
+    // assembly, with their (iteration-invariant) geometry matrices and
+    // the six upper-triangle stiffness entries they add into.
+    struct NLElem { int i; CEntry *e[6]; double Mx[3][3], My[3][3], Mxy[3][3], vol; };
+    std::vector<NLElem> nlElems;
+
+    auto assembleNonlinear = [&]()
+    {
+        for (size_t ei = 0; ei < nlElems.size(); ei++)
+        {
+            const NLElem &ne = nlElems[ei];
+            i = ne.i;
+            El = &meshele[i];
+            vol = ne.vol;
+            for(k = 0; k<3; k++) n[k] = El->p[k];
+            for(j = 0; j<3; j++)
+                for(k = 0; k<3; k++)
+                {
+                    Mx[j][k] = ne.Mx[j][k];
+                    My[j][k] = ne.My[j][k];
+                    Mxy[j][k] = ne.Mxy[j][k];
+                    Mn[j][k] = 0.;
+                }
+
+            if (Iter > 0)
+            {
+                k=meshele[i].blk;
+
+                if ((blockproplist[k].LamType==0) &&
+                        (meshele[i].mu1==meshele[i].mu2)
+                        &&(blockproplist[k].BHpoints>0))
+                {
+                    //	Derive B directly from energy;
+                    v[0]=0;
+                    v[1]=0;
+                    v[2]=0;
+                    for(j=0; j<3; j++)
+                        for(w=0; w<3; w++)
+                            v[j]+=(Mx[j][w]+My[j][w])*L.V[n[w]];
+                    for(j=0,dv=0; j<3; j++) dv+=L.V[n[j]]*v[j];
+                    dv*=(10000.*c*c/vol);
+                    B=sqrt(fabs(dv));
+
+                    // find out new mu from saturation curve;
+                    blockproplist[k].GetBHProps(B,mu,dv);
+                    mu=1./(muo*mu);
+                    meshele[i].mu1=mu;
+                    meshele[i].mu2=mu;
+                    for(j=0; j<3; j++)
+                    {
+                        for(w=0,v[j]=0; w<3; w++)
+                            v[j]+=(Mx[j][w]+My[j][w])*L.V[n[w]];
+                    }
+
+                    K=-200.*c*c*c*dv/vol;
+                    for(j=0; j<3; j++)
+                        for(w=0; w<3; w++)
+                            Mn[j][w]=K*v[j]*v[w];
+                }
+
+                if ((blockproplist[k].LamType==1) && (blockproplist[k].BHpoints>0))
+                {
+
+                    //	Derive B directly from energy;
+                    t=blockproplist[k].LamFill;
+                    v[0]=0;
+                    v[1]=0;
+                    v[2]=0;
+                    for(j=0; j<3; j++)
+                        for(w=0; w<3; w++)
+                            v[j]+=(Mx[j][w]+My[j][w]/(t*t))*L.V[n[w]];
+                    for(j=0,dv=0; j<3; j++) dv+=L.V[n[j]]*v[j];
+                    dv*=(10000.*c*c/vol);
+                    B=sqrt(fabs(dv));
+
+                    // Evaluate BH curve
+                    blockproplist[k].GetBHProps(B,mu,dv);
+                    mu=1./(muo*mu);
+                    meshele[i].mu1=mu*t;
+                    meshele[i].mu2=mu/(t+mu*(1.-t));
+                    for(j=0; j<3; j++)
+                    {
+                        for(w=0,v[j]=0,u[j]=0; w<3; w++)
+                        {
+                            v[j]+=(My[j][w]/t+Mx[j][w])*L.V[n[w]];
+                            u[j]+=(My[j][w]/t + t*Mx[j][w])*L.V[n[w]];
+                        }
+                    }
+                    K=-100.*c*c*c*dv/(vol);
+                    for(j=0; j<3; j++)
+                        for(w=0; w<3; w++)
+                            Mn[j][w]=K*(v[j]*u[w]+v[w]*u[j]);
+                }
+                if ((blockproplist[k].LamType==2) && (blockproplist[k].BHpoints>0))
+                {
+
+                    //	Derive B directly from energy;
+                    t=blockproplist[k].LamFill;
+                    v[0]=0;
+                    v[1]=0;
+                    v[2]=0;
+                    for(j=0; j<3; j++)
+                        for(w=0; w<3; w++)
+                            v[j]+=(Mx[j][w]/(t*t)+My[j][w])*L.V[n[w]];
+                    for(j=0,dv=0; j<3; j++) dv+=L.V[n[j]]*v[j];
+                    dv*=(10000.*c*c/vol);
+                    B=sqrt(fabs(dv));
+
+                    // Evaluate BH curve
+                    blockproplist[k].GetBHProps(B,mu,dv);
+                    mu=1./(muo*mu);
+                    meshele[i].mu2=mu*t;
+                    meshele[i].mu1=mu/(t+mu*(1.-t));
+
+                    for(j=0; j<3; j++)
+                    {
+                        for(w=0,v[j]=0,u[j]=0; w<3; w++)
+                        {
+                            v[j]+=(Mx[j][w]/t + My[j][w])*L.V[n[w]];
+                            u[j]+=(Mx[j][w]/t + t*My[j][w])*L.V[n[w]];
+                        }
+                    }
+                    K=-100.*c*c*c*dv/(vol);
+                    for(j=0; j<3; j++)
+                        for(w=0; w<3; w++)
+                            Mn[j][w]=K*(v[j]*u[w]+v[w]*u[j]);
+
+                }
+                        }
+
+            for(j = 0; j<3; j++)
+                for(k = 0; k<3; k++)
+                    Me[j][k] = (Mx[j][k]/Re(El->mu2) + My[j][k]/Re(El->mu1) + Mxy[j][k] * Re(El->v12) + Mn[j][k]);
+
+            for (j = 0, w = 0; j<3; j++)
+            {
+                for (k = j; k<3; k++, w++)
+                    ne.e[w]->x -= Me[j][k];
+                for (k = 0, t = 0; k<3; k++)
+                    t += Mn[j][k]*L.V[n[k]];
+                L.b[n[j]] -= t;
+            }
+        }
+    };
+
     do
     {
 
@@ -153,7 +299,16 @@ int FSolver::StaticAxisymmetric(CBigLinProb &L)
         printf("Matrix Construction\n");
 //        pctr=0;
 
-        if(Iter>0) L.Wipe();
+        // Linear part (all linear-material elements, sources, point
+        // currents) is assembled once and cached; later iterations restore
+        // it and reassemble only the B-H elements.  BCs / periodicity are
+        // re-applied every iteration as before.
+        if(Iter>0)
+        {
+            L.RestoreLinearPart();
+        }
+        else
+        {
 
         for(i=0; i<NumEls; i++)
         {
@@ -502,112 +657,6 @@ int FSolver::StaticAxisymmetric(CBigLinProb &L)
                     }
                 }
             }
-            else
-            {
-                k=meshele[i].blk;
-
-                if ((blockproplist[k].LamType==0) &&
-                        (meshele[i].mu1==meshele[i].mu2)
-                        &&(blockproplist[k].BHpoints>0))
-                {
-                    //	Derive B directly from energy;
-                    v[0]=0;
-                    v[1]=0;
-                    v[2]=0;
-                    for(j=0; j<3; j++)
-                        for(w=0; w<3; w++)
-                            v[j]+=(Mx[j][w]+My[j][w])*L.V[n[w]];
-                    for(j=0,dv=0; j<3; j++) dv+=L.V[n[j]]*v[j];
-                    dv*=(10000.*c*c/vol);
-                    B=sqrt(fabs(dv));
-
-                    // find out new mu from saturation curve;
-                    blockproplist[k].GetBHProps(B,mu,dv);
-                    mu=1./(muo*mu);
-                    meshele[i].mu1=mu;
-                    meshele[i].mu2=mu;
-                    for(j=0; j<3; j++)
-                    {
-                        for(w=0,v[j]=0; w<3; w++)
-                            v[j]+=(Mx[j][w]+My[j][w])*L.V[n[w]];
-                    }
-
-                    K=-200.*c*c*c*dv/vol;
-                    for(j=0; j<3; j++)
-                        for(w=0; w<3; w++)
-                            Mn[j][w]=K*v[j]*v[w];
-                }
-
-                if ((blockproplist[k].LamType==1) && (blockproplist[k].BHpoints>0))
-                {
-
-                    //	Derive B directly from energy;
-                    t=blockproplist[k].LamFill;
-                    v[0]=0;
-                    v[1]=0;
-                    v[2]=0;
-                    for(j=0; j<3; j++)
-                        for(w=0; w<3; w++)
-                            v[j]+=(Mx[j][w]+My[j][w]/(t*t))*L.V[n[w]];
-                    for(j=0,dv=0; j<3; j++) dv+=L.V[n[j]]*v[j];
-                    dv*=(10000.*c*c/vol);
-                    B=sqrt(fabs(dv));
-
-                    // Evaluate BH curve
-                    blockproplist[k].GetBHProps(B,mu,dv);
-                    mu=1./(muo*mu);
-                    meshele[i].mu1=mu*t;
-                    meshele[i].mu2=mu/(t+mu*(1.-t));
-                    for(j=0; j<3; j++)
-                    {
-                        for(w=0,v[j]=0,u[j]=0; w<3; w++)
-                        {
-                            v[j]+=(My[j][w]/t+Mx[j][w])*L.V[n[w]];
-                            u[j]+=(My[j][w]/t + t*Mx[j][w])*L.V[n[w]];
-                        }
-                    }
-                    K=-100.*c*c*c*dv/(vol);
-                    for(j=0; j<3; j++)
-                        for(w=0; w<3; w++)
-                            Mn[j][w]=K*(v[j]*u[w]+v[w]*u[j]);
-                }
-                if ((blockproplist[k].LamType==2) && (blockproplist[k].BHpoints>0))
-                {
-
-                    //	Derive B directly from energy;
-                    t=blockproplist[k].LamFill;
-                    v[0]=0;
-                    v[1]=0;
-                    v[2]=0;
-                    for(j=0; j<3; j++)
-                        for(w=0; w<3; w++)
-                            v[j]+=(Mx[j][w]/(t*t)+My[j][w])*L.V[n[w]];
-                    for(j=0,dv=0; j<3; j++) dv+=L.V[n[j]]*v[j];
-                    dv*=(10000.*c*c/vol);
-                    B=sqrt(fabs(dv));
-
-                    // Evaluate BH curve
-                    blockproplist[k].GetBHProps(B,mu,dv);
-                    mu=1./(muo*mu);
-                    meshele[i].mu2=mu*t;
-                    meshele[i].mu1=mu/(t+mu*(1.-t));
-
-                    for(j=0; j<3; j++)
-                    {
-                        for(w=0,v[j]=0,u[j]=0; w<3; w++)
-                        {
-                            v[j]+=(Mx[j][w]/t + My[j][w])*L.V[n[w]];
-                            u[j]+=(Mx[j][w]/t + t*My[j][w])*L.V[n[w]];
-                        }
-                    }
-                    K=-100.*c*c*c*dv/(vol);
-                    for(j=0; j<3; j++)
-                        for(w=0; w<3; w++)
-                            Mn[j][w]=K*(v[j]*u[w]+v[w]*u[j]);
-
-                }
-            }
-
             // "Warp" the permeability of this element if part of
             // the conformally mapped external region
             if((labellist[meshele[i].lbl].IsExternal) && (Iter==0))
@@ -618,18 +667,51 @@ int FSolver::StaticAxisymmetric(CBigLinProb &L)
                 meshele[i].mu2/=kludge;
             }
 
-            // combine block matrices into global matrices;
-            for(j=0; j<3; j++)
-                for(k=0; k<3; k++)
-                {
-                    Me[j][k]+= (Mx[j][k]/Re(El->mu2) + My[j][k]/Re(El->mu1) + Mxy[j][k] * Re(El->v12) + Mn[j][k]);
-                    be[j]+=Mn[j][k]*L.V[n[k]];
-                }
+            // Field-dependent (B-H) elements are reassembled every
+            // iteration by assembleNonlinear(); only their invariant
+            // pieces (be and the derivative-BC terms in Me) go into the
+            // cached linear part here.  Their geometry matrices are
+            // expensive in the axisymmetric formulation, so they are
+            // cached too.  See Static2D for the same scheme.
+            k = El->blk;
+            bool nonlinear = (bIncremental == 0)
+                    && (blockproplist[k].BHpoints > 0)
+                    && ((blockproplist[k].LamType == 1)
+                        || (blockproplist[k].LamType == 2)
+                        || ((blockproplist[k].LamType == 0)
+                            && (El->mu1 == El->mu2)));
+            if (nonlinear)
+            {
+                NLElem ne;
+                ne.i = i;
+                ne.vol = vol;
+                for (j = 0; j<3; j++)
+                    for (k = 0; k<3; k++)
+                    {
+                        ne.Mx[j][k] = Mx[j][k];
+                        ne.My[j][k] = My[j][k];
+                        ne.Mxy[j][k] = Mxy[j][k];
+                    }
+                for (j = 0, w = 0; j<3; j++)
+                    for (k = j; k<3; k++, w++)
+                        ne.e[w] = L.Entry(n[j],n[k]);
+                nlElems.push_back(ne);
+            }
+            else
+            {
+                // combine block matrices into global matrices;
+                for(j=0; j<3; j++)
+                    for(k=0; k<3; k++)
+                    {
+                        Me[j][k]+= (Mx[j][k]/Re(El->mu2) + My[j][k]/Re(El->mu1) + Mxy[j][k] * Re(El->v12) + Mn[j][k]);
+                        be[j]+=Mn[j][k]*L.V[n[k]];
+                    }
+            }
 
             for (j=0; j<3; j++)
             {
                 for (k=j; k<3; k++)
-                    L.Put(L.Get(n[j],n[k])-Me[j][k],n[j],n[k]);
+                    L.AddTo(-Me[j][k],n[j],n[k]);
                 L.b[n[j]]-=be[j];
             }
         }
@@ -641,6 +723,12 @@ int FSolver::StaticAxisymmetric(CBigLinProb &L)
                 r=meshnode[i].x;
                 L.b[i]+=(0.01*nodeproplist[meshnode[i].BoundaryMarker].J.re*2.*r);
             }
+
+        L.SaveLinearPart();
+
+        }   // Iter == 0: linear part assembled and cached
+
+        assembleNonlinear();
 
         // apply fixed boundary conditions at points;
         for(i=0; i<NumNodes; i++)

@@ -36,6 +36,9 @@
 #include <cstdio>
 
 #include <csignal>
+#include <chrono>
+#include <cstdlib>
+#include <vector>
 
 #ifdef _MSC_VER
   #ifndef SNPRINTF
@@ -176,6 +179,196 @@ int FSolver::Static2D(CBigLinProb &L)
 
     // build element matrices using the matrices derived in Allaire's book.
 
+    // Field-dependent (B-H curve) elements, registered during the Iter 0
+    // assembly.  e[] are the six upper-triangle stiffness entries of the
+    // element, in (0,0) (0,1) (0,2) (1,1) (1,2) (2,2) order, looked up
+    // once so later iterations add straight into them.
+    struct NLElem { int i; CEntry *e[6]; };
+    std::vector<NLElem> nlElems;
+
+    const bool timing = (getenv("XFEMM_TIMING") != nullptr);
+    std::chrono::steady_clock::time_point tAsm0, tAsm1, tBc1;
+
+    // Per-iteration assembly of the nonlinear elements: update the
+    // permeability from the current solution (Iter > 0), then add the
+    // field-dependent stiffness Mx/mu2 + My/mu1 + Mxy*v12 + Mn and the
+    // Newton right-hand-side term Mn*V.  This is exactly the work the
+    // original single loop did for these elements, minus the pieces that
+    // never change (geometry-only setup aside) and minus the row walks.
+    auto assembleNonlinear = [&]() -> bool
+    {
+        for (size_t ei = 0; ei < nlElems.size(); ei++)
+        {
+            i = nlElems[ei].i;
+            El = &meshele[i];
+
+            for(k = 0; k<3; k++)
+            {
+                n[k] = El->p[k];
+            }
+
+            p[0] = meshnode[n[1]].y - meshnode[n[2]].y;
+            p[1] = meshnode[n[2]].y - meshnode[n[0]].y;
+            p[2] = meshnode[n[0]].y - meshnode[n[1]].y;
+            q[0] = meshnode[n[2]].x - meshnode[n[1]].x;
+            q[1] = meshnode[n[0]].x - meshnode[n[2]].x;
+            q[2] = meshnode[n[1]].x - meshnode[n[0]].x;
+
+            a = (p[0]*q[1] - p[1]*q[0]) / 2.;
+
+            K = (-1. / (4.*a));
+            for(j = 0; j<3; j++)
+            {
+                for(k = 0; k<3; k++)
+                {
+                    Mx[j][k] = K * p[j] * p[k];
+                    My[j][k] = K * q[j] * q[k];
+                    Mxy[j][k] = K*(p[j] * q[k] + p[k] * q[j]);
+                    Mn[j][k] = 0.;
+                }
+            }
+
+            if (Iter > 0)
+            {
+                k = meshele[i].blk;
+
+                if ((blockproplist[k].LamType==0) &&
+                        (meshele[i].mu1==meshele[i].mu2)
+                        &&(blockproplist[k].BHpoints>0))
+                {
+                    for(j = 0,B1 = 0.,B2 = 0.; j<3; j++)
+                    {
+                        B1+=L.V[n[j]]*q[j];
+                        B2+=L.V[n[j]]*p[j];
+                    }
+                    B = c*sqrt(B1*B1+B2*B2)/(0.02*a);
+                    // correction for lengths in cm of 1/0.02
+
+                    // find out new mu from saturation curve;
+                    blockproplist[k].GetBHProps(B,mu,dv);
+                    mu = 1./(muo*mu);
+                    meshele[i].mu1 = mu;
+                    meshele[i].mu2 = mu;
+                    for(j = 0; j<3; j++)
+                    {
+                        for(w = 0,v[j] = 0; w<3; w++)
+                            v[j]+=(Mx[j][w]+My[j][w])*L.V[n[w]];
+                    }
+                    K = -200.*c*c*c*dv/a;
+                    for(j = 0; j<3; j++)
+                    {
+                        for(w = 0; w<3; w++)
+                        {
+                            Mn[j][w] = K*v[j]*v[w];
+                        }
+                    }
+                }
+
+                if ((blockproplist[k].LamType==1) && (blockproplist[k].BHpoints>0))
+                {
+                    t = blockproplist[k].LamFill;
+
+                    for(j = 0,B1 = 0.,B2 = 0.; j<3; j++)
+                    {
+                        B1+=L.V[n[j]]*q[j];
+                        B2+=L.V[n[j]]*p[j]/t;
+                    }
+
+                    B = c*sqrt(B1*B1+B2*B2)/(0.02*a);
+
+                    blockproplist[k].GetBHProps(B,mu,dv);
+
+                    mu = 1./(muo*mu);
+
+                    meshele[i].mu1 = mu*t;
+
+                    meshele[i].mu2 = mu/(t+mu*(1.-t));
+
+                    for(j = 0; j<3; j++)
+                    {
+                        for(w = 0,v[j] = 0,u[j] = 0; w<3; w++)
+                        {
+                            v[j]+=(My[j][w]/t+Mx[j][w])*L.V[n[w]];
+                            u[j]+=(My[j][w]/t + t*Mx[j][w])*L.V[n[w]];
+                        }
+                    }
+
+                    K = -100.*c*c*c*dv/(a);
+
+                    for(j = 0; j<3; j++)
+                    {
+                        for(w = 0; w<3; w++)
+                        {
+                            Mn[j][w] = K*(v[j]*u[w]+v[w]*u[j]);
+                        }
+                    }
+                }
+                if ((blockproplist[k].LamType==2) && (blockproplist[k].BHpoints>0))
+                {
+                    t = blockproplist[k].LamFill;
+
+                    for(j = 0,B1 = 0.,B2 = 0.; j<3; j++)
+                    {
+                        B1+=(L.V[n[j]]*q[j])/t;
+                        B2+=L.V[n[j]]*p[j];
+                    }
+
+                    B = c*sqrt(B1*B1+B2*B2)/(0.02*a);
+
+                    blockproplist[k].GetBHProps(B,mu,dv);
+
+                    mu = 1./(muo*mu);
+
+                    meshele[i].mu2 = mu*t;
+
+                    meshele[i].mu1 = mu/(t+mu*(1.-t));
+
+                    for(j = 0; j<3; j++)
+                    {
+                        for(w = 0,v[j] = 0,u[j] = 0; w<3; w++)
+                        {
+                            v[j]+=(Mx[j][w]/t + My[j][w])*L.V[n[w]];
+                            u[j]+=(Mx[j][w]/t + t*My[j][w])*L.V[n[w]];
+                        }
+                    }
+
+                    K = -100.*c*c*c*dv/(a);
+
+                    for(j = 0; j<3; j++)
+                    {
+                        for(w = 0; w<3; w++)
+                        {
+                            Mn[j][w] = K*(v[j]*u[w]+v[w]*u[j]);
+                        }
+                    }
+                }
+                        }
+
+            // field-dependent stiffness and Newton RHS term
+            for (j = 0; j<3; j++)
+            {
+                for (k = 0; k<3; k++)
+                {
+                    Me[j][k] = (Mx[j][k]/Re(El->mu2) + My[j][k]/Re(El->mu1) + Mxy[j][k] * Re(El->v12) + Mn[j][k]);
+                }
+            }
+
+            for (j = 0, w = 0; j<3; j++)
+            {
+                for (k = j; k<3; k++, w++)
+                {
+                    nlElems[ei].e[w]->x -= Me[j][k];
+                }
+                for (k = 0, t = 0; k<3; k++)
+                {
+                    t += Mn[j][k]*L.V[n[k]];
+                }
+                L.b[n[j]] -= t;
+            }
+        }
+        return true;
+    };
+
     do
     {
 
@@ -185,10 +378,23 @@ int FSolver::Static2D(CBigLinProb &L)
 
 //        pctr = 0;
 
+        if (timing) tAsm0 = std::chrono::steady_clock::now();
+
+        // The system splits into an iteration-invariant part (air-gap
+        // elements, every linear-material element, all source terms,
+        // point currents) and the B-H elements whose stiffness depends on
+        // the current solution.  The invariant part is assembled once at
+        // Iter 0 and snapshotted; later iterations restore the snapshot
+        // and reassemble only the nonlinear elements (assembleNonlinear).
+        // Boundary conditions and periodicity constraints modify the
+        // assembled system in place, so they are re-applied every
+        // iteration after the restore, exactly as before.
         if(Iter > 0)
         {
-            L.Wipe();
+            L.RestoreLinearPart();
         }
+        else
+        {
 
         // first, tack in air gap element contributions
         for(i=0;i<NumAirGapElems;i++)
@@ -697,129 +903,38 @@ int FSolver::Static2D(CBigLinProb &L)
                 }
 
             }
+            // Elements whose permeability changes with the field are
+            // handled by assembleNonlinear() every iteration.  Here (Iter
+            // 0 only) their iteration-invariant pieces go into the cached
+            // linear part: be (currents, magnetization, derivative BCs)
+            // and the derivative-BC terms already in Me.  Everything else
+            // gets its full stiffness contribution now, once.
+            k = El->blk;
+            bool nonlinear = (bIncremental == MS_LEGACY_FALSE)
+                    && (blockproplist[k].BHpoints > 0)
+                    && ((blockproplist[k].LamType == 1)
+                        || (blockproplist[k].LamType == 2)
+                        || ((blockproplist[k].LamType == 0)
+                            && (El->mu1 == El->mu2)));
+            if (nonlinear)
+            {
+                NLElem ne;
+                ne.i = i;
+                for (j = 0, w = 0; j<3; j++)
+                    for (k = j; k<3; k++, w++)
+                        ne.e[w] = L.Entry(n[j],n[k]);
+                nlElems.push_back(ne);
+            }
             else
             {
-                k = meshele[i].blk;
-
-                if ((blockproplist[k].LamType==0) &&
-                        (meshele[i].mu1==meshele[i].mu2)
-                        &&(blockproplist[k].BHpoints>0))
-                {
-                    for(j = 0,B1 = 0.,B2 = 0.; j<3; j++)
+                // combine block matrices into global matrices;
+                for (j = 0; j<3; j++)
+                    for (k = 0; k<3; k++)
                     {
-                        B1+=L.V[n[j]]*q[j];
-                        B2+=L.V[n[j]]*p[j];
+                        Me[j][k]+= (Mx[j][k]/Re(El->mu2) + My[j][k]/Re(El->mu1) + Mxy[j][k] * Re(El->v12) + Mn[j][k]);
+                        be[j]+=Mn[j][k]*L.V[n[k]];
                     }
-                    B = c*sqrt(B1*B1+B2*B2)/(0.02*a);
-                    // correction for lengths in cm of 1/0.02
-
-                    // find out new mu from saturation curve;
-                    blockproplist[k].GetBHProps(B,mu,dv);
-                    mu = 1./(muo*mu);
-                    meshele[i].mu1 = mu;
-                    meshele[i].mu2 = mu;
-                    for(j = 0; j<3; j++)
-                    {
-                        for(w = 0,v[j] = 0; w<3; w++)
-                            v[j]+=(Mx[j][w]+My[j][w])*L.V[n[w]];
-                    }
-                    K = -200.*c*c*c*dv/a;
-                    for(j = 0; j<3; j++)
-                    {
-                        for(w = 0; w<3; w++)
-                        {
-                            Mn[j][w] = K*v[j]*v[w];
-                        }
-                    }
-                }
-
-                if ((blockproplist[k].LamType==1) && (blockproplist[k].BHpoints>0))
-                {
-                    t = blockproplist[k].LamFill;
-
-                    for(j = 0,B1 = 0.,B2 = 0.; j<3; j++)
-                    {
-                        B1+=L.V[n[j]]*q[j];
-                        B2+=L.V[n[j]]*p[j]/t;
-                    }
-
-                    B = c*sqrt(B1*B1+B2*B2)/(0.02*a);
-
-                    blockproplist[k].GetBHProps(B,mu,dv);
-
-                    mu = 1./(muo*mu);
-
-                    meshele[i].mu1 = mu*t;
-
-                    meshele[i].mu2 = mu/(t+mu*(1.-t));
-
-                    for(j = 0; j<3; j++)
-                    {
-                        for(w = 0,v[j] = 0,u[j] = 0; w<3; w++)
-                        {
-                            v[j]+=(My[j][w]/t+Mx[j][w])*L.V[n[w]];
-                            u[j]+=(My[j][w]/t + t*Mx[j][w])*L.V[n[w]];
-                        }
-                    }
-
-                    K = -100.*c*c*c*dv/(a);
-
-                    for(j = 0; j<3; j++)
-                    {
-                        for(w = 0; w<3; w++)
-                        {
-                            Mn[j][w] = K*(v[j]*u[w]+v[w]*u[j]);
-                        }
-                    }
-                }
-                if ((blockproplist[k].LamType==2) && (blockproplist[k].BHpoints>0))
-                {
-                    t = blockproplist[k].LamFill;
-
-                    for(j = 0,B1 = 0.,B2 = 0.; j<3; j++)
-                    {
-                        B1+=(L.V[n[j]]*q[j])/t;
-                        B2+=L.V[n[j]]*p[j];
-                    }
-
-                    B = c*sqrt(B1*B1+B2*B2)/(0.02*a);
-
-                    blockproplist[k].GetBHProps(B,mu,dv);
-
-                    mu = 1./(muo*mu);
-
-                    meshele[i].mu2 = mu*t;
-
-                    meshele[i].mu1 = mu/(t+mu*(1.-t));
-
-                    for(j = 0; j<3; j++)
-                    {
-                        for(w = 0,v[j] = 0,u[j] = 0; w<3; w++)
-                        {
-                            v[j]+=(Mx[j][w]/t + My[j][w])*L.V[n[w]];
-                            u[j]+=(Mx[j][w]/t + t*My[j][w])*L.V[n[w]];
-                        }
-                    }
-
-                    K = -100.*c*c*c*dv/(a);
-
-                    for(j = 0; j<3; j++)
-                    {
-                        for(w = 0; w<3; w++)
-                        {
-                            Mn[j][w] = K*(v[j]*u[w]+v[w]*u[j]);
-                        }
-                    }
-                }
             }
-
-            // combine block matrices into global matrices;
-            for (j = 0; j<3; j++)
-                for (k = 0; k<3; k++)
-                {
-                    Me[j][k]+= (Mx[j][k]/Re(El->mu2) + My[j][k]/Re(El->mu1) + Mxy[j][k] * Re(El->v12) + Mn[j][k]);
-                    be[j]+=Mn[j][k]*L.V[n[k]];
-                }
 
             for (j = 0; j<3; j++)
             {
@@ -840,6 +955,18 @@ int FSolver::Static2D(CBigLinProb &L)
                 L.b[i]+=(0.01*nodeproplist[meshnode[i].BoundaryMarker].J.re);
             }
         }
+
+        L.SaveLinearPart();
+
+        }   // Iter == 0: linear part assembled and cached
+
+        // field-dependent elements: every iteration
+        if (assembleNonlinear() == false)
+        {
+            return false;
+        }
+
+        if (timing) tAsm1 = std::chrono::steady_clock::now();
 
         // apply fixed boundary conditions at points;
         for(i = 0; i<NumNodes; i++)
@@ -956,6 +1083,8 @@ int FSolver::Static2D(CBigLinProb &L)
             }
         }
 
+        if (timing) tBc1 = std::chrono::steady_clock::now();
+
         // solve the problem;
         for(j=0;j<NumNodes;j++)
         {
@@ -965,6 +1094,17 @@ int FSolver::Static2D(CBigLinProb &L)
         if (L.PCGSolve(Iter)==false)
         {
             return false;
+        }
+
+        if (timing)
+        {
+            auto tSolve1 = std::chrono::steady_clock::now();
+            fprintf(stderr,"[timing] iter %d: assembly %.1f ms (%s), bc+pbc %.1f ms, solve %.1f ms\n",
+                    Iter,
+                    std::chrono::duration<double,std::milli>(tAsm1-tAsm0).count(),
+                    Iter==0 ? "full" : "nonlinear only",
+                    std::chrono::duration<double,std::milli>(tBc1-tAsm1).count(),
+                    std::chrono::duration<double,std::milli>(tSolve1-tBc1).count());
         }
 
         if (LinearFlag==false)

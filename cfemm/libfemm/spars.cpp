@@ -247,6 +247,68 @@ void CBigLinProb::AddTo(double v, int p, int q)
     if (!colRows.empty()) colRows[q].push_back(std::make_pair(p,m));
 }
 
+CEntry *CBigLinProb::Entry(int p, int q)
+{
+    CEntry *e,*l = NULL;
+
+    if (q<p)
+        swap(p,q);
+
+    e = M[p];
+
+    while ((e->c < q) && (e->next != NULL))
+    {
+        l = e;
+        e = e->next;
+    }
+
+    if (e->c == q) return e;
+
+    CEntry *m = new CEntry;
+    m->c = q;
+    m->x = 0;
+
+    if ((e->next == NULL) && (q > e->c))
+    {
+        e->next = m;
+    }
+    else
+    {
+        l->next = m;
+        m->next = e;
+    }
+
+    if (!colRows.empty()) colRows[q].push_back(std::make_pair(p,m));
+    return m;
+}
+
+void CBigLinProb::SaveLinearPart()
+{
+    linEntries.clear();
+    linVals.clear();
+    for(int i=0; i<n; i++)
+    {
+        for(CEntry *e=M[i]; e!=NULL; e=e->next)
+        {
+            linEntries.push_back(e);
+            linVals.push_back(e->x);
+        }
+    }
+    linB.assign(b, b+n);
+}
+
+void CBigLinProb::RestoreLinearPart()
+{
+    // zero everything (including entries created after the snapshot),
+    // then put the saved values back
+    Wipe();
+    for(size_t k=0; k<linEntries.size(); k++)
+    {
+        linEntries[k]->x = linVals[k];
+    }
+    for(int i=0; i<n; i++) b[i]=linB[i];
+}
+
 void CBigLinProb::SyncColumnAdjacency()
 {
     // once built, colRows is maintained incrementally by the insertion

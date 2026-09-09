@@ -360,7 +360,7 @@ in the toolbox repo):
 
 Candidate fixes, est. serial savings per design:
 
-- **Newton reassembly (xfemm)** — analyze's ~0.66 s is roughly 0.12 s
+- **Newton reassembly (xfemm)** — DONE, see item 12. analyze's ~0.66 s is roughly 0.12 s
   meshing + ~0.35 s of 12× full matrix reassembly + ~0.11 s LDLT solves +
   I/O. The solver wipes and reassembles every element each Newton
   iteration, but only nonlinear-material element contributions change:
@@ -393,3 +393,79 @@ Realistic stack (reassembly + tier 2 + persistent workers): ~1.1 s →
 ~0.5–0.65 s serial per design, i.e. MC ≈ 45–60 s. Diminishing returns
 beyond that without threading the solve or batching designs per process.
 
+## 12. Cache the linear part of the system across Newton iterations — IMPLEMENTED (2026-09-09)
+
+`Static2D` / `StaticAxisymmetric` used to `Wipe()` and reassemble every
+element on every Newton iteration: air-gap elements, all linear-material
+elements, every source term (including a Lua `doString` per element for
+functional magnetization directions), then boundary conditions. Only the
+B-H-curve elements actually change between iterations.
+
+Change:
+
+- `CBigLinProb::SaveLinearPart()` / `RestoreLinearPart()` snapshot every
+  entry value (by pointer -- entries are never deleted or moved) and `b`;
+  restore = `Wipe()` + write-back, O(nnz). `CBigLinProb::Entry(p,q)`
+  returns the entry pointer (creating it if absent).
+- Iteration 0 assembles the invariant part as before (AGEs, linear
+  elements, all `be` terms, the derivative-BC pieces of `Me` for every
+  element, point currents) and snapshots it. B-H elements are registered
+  in an `nlElems` list with the six upper-triangle entry pointers of
+  their stiffness block (the axisymmetric solver also caches their
+  geometry matrices `Mx/My/Mxy` and `vol`, which are expensive there).
+- Every iteration then runs `assembleNonlinear()`: for each registered
+  element, update `mu`/`Mn` from the current `V` (the code that used to sit
+  in the `else` branch of the element loop, unchanged), and add
+  `Mx/mu2 + My/mu1 + Mxy*v12 + Mn` straight into the cached entry pointers
+  plus the `Mn*V` Newton term into `b`. Iteration > 0 does
+  `RestoreLinearPart()` instead of `Wipe()`.
+- `SetValue` / `Periodicity` / `AntiPeriodicity` still run after every
+  assembly, unchanged: they modify the assembled system in place, and the
+  restore undoes them.
+- `XFEMM_TIMING=1` prints per-iteration assembly / BC / solve times to
+  stderr (Static2D only).
+
+The nonlinear classification is the one the old `else` branch used
+(`BHpoints>0`, `LamType` 0 with `mu1==mu2`, or `LamType` 1/2, and not an
+incremental/frozen-permeability problem), evaluated once after the Iter-0
+permeability assignment. Incremental/frozen problems and all-linear
+problems take a single iteration and are unaffected. `El->Jprev` now
+accumulates once instead of once per iteration; it is not written by
+`WriteStatic2D`, so nothing observable changes.
+
+Measured (`motor`, 26k nodes, 12 Newton iterations, `XFEMM_TIMING=1`):
+
+| Phase per iteration | Before | After |
+|---|---|---|
+| assembly, iter 0 | ~37 ms | 37 ms (full) |
+| assembly, iter > 0 | ~37 ms | 5.5 ms (B-H elements only) |
+| BC + periodicity | ~1.1 ms | 1.1 ms |
+| LDLT solve (+ CSR flatten + Eigen copy) | ~10-12 ms | 10-12 ms |
+
+| Model | fsolver before | after | solution rel. L2 diff |
+|---|---|---|---|
+| motor (nonlinear, 12 iters) | 0.568 s | 0.325 s | 1.7e-14 |
+| temp (nonlinear, 3 iters) | 0.100 s | 0.104 s | 1.7e-12 |
+| tq (linear) | 0.037 s | 0.039 s | 0 (identical) |
+| age (linear) | 0.036 s | 0.039 s | 0 (identical) |
+| axi check model (nonlinear axisymmetric, 5 iters) | -- | -- | 6.5e-16 |
+
+The tiny differences on nonlinear models come from the changed order of
+floating-point accumulation into shared entries (linear elements first,
+B-H elements after) and are far below the Newton tolerance; Newton
+iteration counts are unchanged on every model. `ctest -C Release`: 33/33.
+Downstream toolbox: serial per design 0.86 -> 0.62 s (femmcli fused
+draw+solve+extract process), 24-worker monte-carlo 1051 -> 1214
+designs/min; toolbox suite 427/427.
+
+Remaining `motor` budget (~0.325 s): iter 0 ~64 ms; 11 x ~17 ms
+iterations (~115 ms of that is the direct solve, ~60 ms nonlinear
+assembly, ~13 ms BCs); ~70 ms mesh load + `.ans` write + process start.
+Next levers, in order: (a) the direct solve now dominates; the
+per-iteration `FlattenMatrix` + Eigen copy + `analyzePattern`-reuse path
+is where to look. The stale-factorization mode (`XFEMM_DIRECT=2`) was
+re-benchmarked with the cheap assembly and is NOT a lever: `motor` 0.647 s
+vs 0.325 s and 1e-7 relative solution drift -- the CG iterations on the
+stale preconditioner cost more than a fresh factorization; (b) `.ans`
+write (`fprintf("%.17g")` x nodes) and the mesh-file load; (c) `GetBHProps`
+linear curve scan per B-H element per iteration (item 9).
