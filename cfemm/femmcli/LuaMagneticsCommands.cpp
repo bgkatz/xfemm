@@ -2103,7 +2103,9 @@ int femmcli::LuaMagneticsCommands::luaProblemDefinition(lua_State * L)
     if (n==3) return 0;
 
     double precision = lua_tonumber(L,4).re;
-    if (precision < 1.e-16 || precision >1.e-8)
+    // FEMM allows any positive precision; a looser tolerance than 1e-8 is a
+    // legitimate speed/accuracy trade for design sweeps (Newton stops at 100x it)
+    if (precision < 1.e-16 || precision > 1.e-3)
     {
         std::string msg = "Invalid Precision " + std::to_string(precision);
         lua_error(L,msg.c_str());

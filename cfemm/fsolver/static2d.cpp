@@ -1150,6 +1150,11 @@ int FSolver::Static2D(CBigLinProb &L)
             char outstr[256];
             sprintf(outstr,"Newton Iteration(%i) Relax=%.4g\n",Iter,Relax);
             PrintMessage(outstr);
+            if (timing)
+            {
+                fprintf(stderr,"[newton] iter %d: rel change %.3e relax %.4g (%d B-H elements of %d)\n",
+                        Iter, res, Relax, (int)nlElems.size(), NumEls);
+            }
 //        TheView->SetDlgItemText(IDC_FRAME2,outstr);
             j = (int)  (100.*log10(res)/(log10(Precision)+2.));
             if (j>100)

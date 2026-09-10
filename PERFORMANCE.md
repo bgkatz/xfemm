@@ -469,3 +469,54 @@ vs 0.325 s and 1e-7 relative solution drift -- the CG iterations on the
 stale preconditioner cost more than a fresh factorization; (b) `.ans`
 write (`fprintf("%.17g")` x nodes) and the mesh-file load; (c) `GetBHProps`
 linear curve scan per B-H element per iteration (item 9).
+
+## 13. Newton convergence study — NO SOLVER CHANGE (2026-09-09)
+
+With assembly cheap (item 12) the 12 Newton iterations of `motor` are ~200 ms
+of its 0.30 s, so the iteration count was examined. Instrumentation
+(`XFEMM_TIMING=1` now also prints a `[newton]` line per iteration with the
+relative change) and dumps of every iterate against the converged solution
+gave this picture for `motor`:
+
+- Iterations 2-6 converge *linearly* with ratio ~0.5; only the last three are
+  fast. `temp` (lightly saturated) is quadratic from the start.
+- The Newton direction is right (cosine 0.94-0.99 with the true remaining
+  correction) but the step is only 55-63 % of the needed length. This is
+  Newton on a convex H(B) approached from the saturated side: the tangent is
+  steeper than the chord, so every step undershoots. The first iterate is far
+  into saturation (peak B 12.8 T from the initial-slope permeability; the
+  converged peak is 3.69 T with ~1000 elements beyond the end of the M-19
+  curve, where the code extrapolates linearly).
+- The tangent term is analytically consistent (derived: `K = -200 c^3 dv/a`
+  with `dv = d(nu)/d(B^2)`; confirmed numerically: scaling it by 0.5/0.75/1.5
+  makes convergence worse in every case, and no scale gives quadratic
+  convergence).
+- The starting permeability does not matter: initialising B-H elements at the
+  permeability of 1.0 / 1.5 / 1.8 T instead of the initial slope changes the
+  trajectory by <10 % and never the iteration count.
+
+Tried and rejected: geometric step extrapolation (when successive steps are
+parallel and shrink with ratio r, extend by 1/(1-r); guarded by a cosine and
+ratio window and a one-shot safety). On `motor` it saved one iteration
+(0.320 -> 0.286 s); across 36 real monte-carlo geometries it changed the mean
+iteration count from 11.25 to 10.94, cost 6 designs an extra iteration and
+saved 1.7 % of total solve time. Looser guards oscillate (17 iterations). Not
+adopted. A proper energy line search along the Newton direction would be the
+principled fix, but each iteration is ~17 ms and the search needs a
+re-assembly (~6 ms) plus residual mat-vecs, so its net upside is estimated
+at <=10 % -- not pursued.
+
+What did pay: the stopping tolerance. Newton stops at `100 x Precision`
+relative change; the toolbox always asked for Precision 1e-8 (stop at 1e-6)
+because femmcli's `mi_probdef` rejected anything looser than 1e-8 -- that
+check (`LuaMagneticsCommands.cpp`) now allows up to 1e-3, as FEMM itself
+does. Toolbox path, 6 designs, torque vs Precision 1e-8:
+
+| Precision | Newton stop | max torque change | solve time |
+|---|---|---|---|
+| 1e-7 | 1e-5 | 0.0 ppm | -4 % |
+| 1e-6 | 1e-4 | 0.1 ppm | -7 % |
+| 1e-5 | 1e-3 | 72 ppm | -13 % |
+
+The toolbox now exposes this as `MotorSpec.fea_precision` (default 1e-6).
+
